@@ -21,7 +21,23 @@ import org.apache.uniffle.common.rpc.StatusCode;
 
 public class RssStartSortMergeResponse extends ClientResponse {
 
+  private boolean stageAttemptAccepted;
+  private boolean hasStageAttemptAccepted;
+
   public RssStartSortMergeResponse(StatusCode statusCode) {
     super(statusCode);
+  }
+
+  public boolean isStageAttemptAccepted() {
+    return stageAttemptAccepted;
+  }
+
+  public void setStageAttemptAccepted(boolean stageAttemptAccepted) {
+    this.stageAttemptAccepted = stageAttemptAccepted;
+    this.hasStageAttemptAccepted = true;
+  }
+
+  public boolean hasStageAttemptAccepted() {
+    return hasStageAttemptAccepted;
   }
 }

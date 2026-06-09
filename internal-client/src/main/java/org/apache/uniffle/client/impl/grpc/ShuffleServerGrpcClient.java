@@ -254,13 +254,19 @@ public class ShuffleServerGrpcClient extends GrpcClient implements ShuffleServer
     return getBlockingStub().registerShuffle(reqBuilder.build());
   }
 
-  private ShuffleCommitResponse doSendCommit(String appId, int shuffleId) {
-    ShuffleCommitRequest request =
-        ShuffleCommitRequest.newBuilder().setAppId(appId).setShuffleId(shuffleId).build();
+  private ShuffleCommitResponse doSendCommit(RssSendCommitRequest request) {
+    ShuffleCommitRequest.Builder requestBuilder =
+        ShuffleCommitRequest.newBuilder()
+            .setAppId(request.getAppId())
+            .setShuffleId(request.getShuffleId());
+    if (request.hasStageAttemptNumber()) {
+      requestBuilder.setStageAttemptNumber(request.getStageAttemptNumber());
+    }
+    ShuffleCommitRequest protoRequest = requestBuilder.build();
     int retryNum = 0;
     while (retryNum <= maxRetryAttempts) {
       try {
-        ShuffleCommitResponse response = getBlockingStub().commitShuffleTask(request);
+        ShuffleCommitResponse response = getBlockingStub().commitShuffleTask(protoRequest);
         return response;
       } catch (Exception e) {
         retryNum++;
@@ -471,27 +477,23 @@ public class ShuffleServerGrpcClient extends GrpcClient implements ShuffleServer
     return response;
   }
 
-  private RssProtos.ShuffleUnregisterResponse doUnregisterShuffle(
-      String appId, int shuffleId, int timeoutSec) {
-    RssProtos.ShuffleUnregisterRequest request =
-        RssProtos.ShuffleUnregisterRequest.newBuilder()
-            .setAppId(appId)
-            .setShuffleId(shuffleId)
-            .build();
-    return blockingStub.withDeadlineAfter(timeoutSec, TimeUnit.SECONDS).unregisterShuffle(request);
-  }
-
   @Override
   public RssUnregisterShuffleResponse unregisterShuffle(RssUnregisterShuffleRequest request) {
     RssProtos.ShuffleUnregisterResponse rpcResponse =
-        doUnregisterShuffle(request.getAppId(), request.getShuffleId(), request.getTimeoutSec());
+        blockingStub
+            .withDeadlineAfter(request.getTimeoutSec(), TimeUnit.SECONDS)
+            .unregisterShuffle(request.toProto());
 
     RssUnregisterShuffleResponse response;
     RssProtos.StatusCode statusCode = rpcResponse.getStatus();
 
     switch (statusCode) {
       case SUCCESS:
-        response = new RssUnregisterShuffleResponse(StatusCode.SUCCESS);
+        response =
+            new RssUnregisterShuffleResponse(
+                StatusCode.SUCCESS,
+                rpcResponse.getStageAttemptCleanupCompleted(),
+                rpcResponse.hasStageAttemptCleanupCompleted());
         break;
       default:
         String msg =
@@ -697,7 +699,7 @@ public class ShuffleServerGrpcClient extends GrpcClient implements ShuffleServer
 
   @Override
   public RssSendCommitResponse sendCommit(RssSendCommitRequest request) {
-    ShuffleCommitResponse rpcResponse = doSendCommit(request.getAppId(), request.getShuffleId());
+    ShuffleCommitResponse rpcResponse = doSendCommit(request);
 
     RssSendCommitResponse response;
     if (rpcResponse.getStatus() != RssProtos.StatusCode.SUCCESS) {
@@ -718,6 +720,9 @@ public class ShuffleServerGrpcClient extends GrpcClient implements ShuffleServer
     } else {
       response = new RssSendCommitResponse(StatusCode.SUCCESS);
       response.setCommitCount(rpcResponse.getCommitCount());
+      if (rpcResponse.hasStageAttemptAccepted()) {
+        response.setStageAttemptAccepted(rpcResponse.getStageAttemptAccepted());
+      }
     }
     return response;
   }
@@ -748,11 +753,14 @@ public class ShuffleServerGrpcClient extends GrpcClient implements ShuffleServer
 
   @Override
   public RssFinishShuffleResponse finishShuffle(RssFinishShuffleRequest request) {
-    FinishShuffleRequest rpcRequest =
+    FinishShuffleRequest.Builder rpcRequestBuilder =
         FinishShuffleRequest.newBuilder()
             .setAppId(request.getAppId())
-            .setShuffleId(request.getShuffleId())
-            .build();
+            .setShuffleId(request.getShuffleId());
+    if (request.hasStageAttemptNumber()) {
+      rpcRequestBuilder.setStageAttemptNumber(request.getStageAttemptNumber());
+    }
+    FinishShuffleRequest rpcRequest = rpcRequestBuilder.build();
     long start = System.currentTimeMillis();
     FinishShuffleResponse rpcResponse = getBlockingStub().finishShuffle(rpcRequest);
 
@@ -782,6 +790,9 @@ public class ShuffleServerGrpcClient extends GrpcClient implements ShuffleServer
           requestInfo,
           System.currentTimeMillis() - start);
       response = new RssFinishShuffleResponse(StatusCode.SUCCESS);
+      if (rpcResponse.hasStageAttemptAccepted()) {
+        response.setStageAttemptAccepted(rpcResponse.getStageAttemptAccepted());
+      }
     }
     return response;
   }
@@ -795,7 +806,7 @@ public class ShuffleServerGrpcClient extends GrpcClient implements ShuffleServer
     RssReportShuffleResultResponse response;
     switch (statusCode) {
       case SUCCESS:
-        response = new RssReportShuffleResultResponse(StatusCode.SUCCESS);
+        response = RssReportShuffleResultResponse.fromProto(rpcResponse);
         break;
       default:
         String msg =
@@ -1163,13 +1174,16 @@ public class ShuffleServerGrpcClient extends GrpcClient implements ShuffleServer
       throw new RssException("Errors on serializing task ids bitmap.", e);
     }
 
-    RssProtos.StartSortMergeRequest rpcRequest =
+    RssProtos.StartSortMergeRequest.Builder rpcRequestBuilder =
         RssProtos.StartSortMergeRequest.newBuilder()
             .setAppId(request.getAppId())
             .setShuffleId(request.getShuffleId())
             .setPartitionId(request.getPartitionId())
-            .setUniqueBlocksBitmap(serializedBlockIdsBytes)
-            .build();
+            .setUniqueBlocksBitmap(serializedBlockIdsBytes);
+    if (request.hasStageAttemptNumber()) {
+      rpcRequestBuilder.setStageAttemptNumber(request.getStageAttemptNumber());
+    }
+    RssProtos.StartSortMergeRequest rpcRequest = rpcRequestBuilder.build();
     long start = System.currentTimeMillis();
     RssProtos.StartSortMergeResponse rpcResponse = getBlockingStub().startSortMerge(rpcRequest);
     String requestInfo =
@@ -1191,6 +1205,9 @@ public class ShuffleServerGrpcClient extends GrpcClient implements ShuffleServer
     switch (statusCode) {
       case SUCCESS:
         response = new RssStartSortMergeResponse(StatusCode.SUCCESS);
+        if (rpcResponse.hasStageAttemptAccepted()) {
+          response.setStageAttemptAccepted(rpcResponse.getStageAttemptAccepted());
+        }
         break;
       default:
         String msg =

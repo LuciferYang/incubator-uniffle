@@ -106,6 +106,9 @@ public class MergedResult {
           partition.releaseMemory(requireSize);
         }
       }
+      if (!success) {
+        throw new IOException("Failed to cache merged block for partition " + partition);
+      }
       offsets.add(written);
     }
 

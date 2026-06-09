@@ -64,7 +64,8 @@ public class HadoopShuffleDeleteHandler implements ShuffleDeleteHandler {
         } catch (Exception e) {
           if (e instanceof FileNotFoundException) {
             LOG.info("[{}] doesn't exist, ignore it.", path);
-            return false;
+            isSuccess = true;
+            break;
           }
           times++;
           LOG.warn(
@@ -94,6 +95,7 @@ public class HadoopShuffleDeleteHandler implements ShuffleDeleteHandler {
                 + " in "
                 + (System.currentTimeMillis() - start)
                 + " ms");
+        return false;
       }
     }
     return true;
@@ -101,7 +103,9 @@ public class HadoopShuffleDeleteHandler implements ShuffleDeleteHandler {
 
   private void delete(FileSystem fileSystem, Path path, String filePrefix) throws IOException {
     if (filePrefix == null) {
-      fileSystem.delete(path, true);
+      if (!fileSystem.delete(path, true)) {
+        throw new IOException("Failed to delete path " + path);
+      }
       return;
     }
     FileStatus[] fileStatuses = fileSystem.listStatus(path);
@@ -110,13 +114,17 @@ public class HadoopShuffleDeleteHandler implements ShuffleDeleteHandler {
         delete(fileSystem, fileStatus.getPath(), filePrefix);
       } else {
         if (fileStatus.getPath().getName().startsWith(filePrefix)) {
-          fileSystem.delete(fileStatus.getPath(), true);
+          if (!fileSystem.delete(fileStatus.getPath(), true)) {
+            throw new IOException("Failed to delete path " + fileStatus.getPath());
+          }
         }
       }
     }
     ContentSummary contentSummary = fileSystem.getContentSummary(path);
     if (contentSummary.getFileCount() == 0) {
-      fileSystem.delete(path, true);
+      if (!fileSystem.delete(path, true)) {
+        throw new IOException("Failed to delete path " + path);
+      }
     }
   }
 }

@@ -48,6 +48,7 @@ import org.apache.uniffle.common.serializer.SerializerInstance;
 import org.apache.uniffle.common.serializer.SerializerUtils;
 import org.apache.uniffle.common.serializer.writable.WritableSerializer;
 import org.apache.uniffle.common.util.BlockIdLayout;
+import org.apache.uniffle.common.util.RssUtils;
 import org.apache.uniffle.proto.RssProtos;
 import org.apache.uniffle.server.ShuffleServer;
 import org.apache.uniffle.server.ShuffleServerConf;
@@ -101,6 +102,159 @@ public class ShuffleMergeManagerTest {
       shuffleServer.stopServer();
       shuffleServer = null;
     }
+  }
+
+  @org.junit.jupiter.api.Test
+  void startSortMergeShouldResetMergingPartitionForNewerStageAndIgnoreStaleStage()
+      throws Exception {
+    List<MergeEvent> events = new ArrayList<>();
+    MergeEventHandler eventHandler =
+        new MergeEventHandler() {
+          @Override
+          public boolean handle(MergeEvent event) {
+            events.add(event);
+            return true;
+          }
+
+          @Override
+          public int getEventNumInMerge() {
+            return 0;
+          }
+
+          @Override
+          public void stop() {}
+        };
+    Shuffle<String, Integer> shuffle =
+        new Shuffle<>(
+            serverConf,
+            eventHandler,
+            null,
+            APP_ID,
+            SHUFFLE_ID,
+            String.class,
+            Integer.class,
+            Comparator.naturalOrder(),
+            -1,
+            Thread.currentThread().getContextClassLoader());
+    Roaring64NavigableMap blockIdMap = Roaring64NavigableMap.bitmapOf(1L);
+
+    shuffle.startSortMerge(PARTITION_ID, blockIdMap, 0);
+    assertEquals(MergeState.MERGING, shuffle.getPartition(PARTITION_ID).getState());
+    assertEquals(1, events.size());
+    assertTrue(events.get(0).hasStageAttemptNumber());
+    assertEquals(0, events.get(0).getStageAttemptNumber());
+
+    shuffle.startSortMerge(PARTITION_ID, blockIdMap, 0);
+    assertEquals(1, events.size());
+
+    shuffle.startSortMerge(PARTITION_ID, blockIdMap, 2);
+    assertEquals(MergeState.MERGING, shuffle.getPartition(PARTITION_ID).getState());
+    assertEquals(2, events.size());
+    assertTrue(events.get(1).hasStageAttemptNumber());
+    assertEquals(2, events.get(1).getStageAttemptNumber());
+
+    shuffle.startSortMerge(PARTITION_ID, blockIdMap, 1);
+    assertEquals(2, events.size());
+  }
+
+  @org.junit.jupiter.api.Test
+  void startSortMergeShouldCleanOlderRemoteMergeStageResults() throws Exception {
+    shuffleServer = new ShuffleServer(serverConf);
+    ShuffleTaskManager shuffleTaskManager = shuffleServer.getShuffleTaskManager();
+    ShuffleMergeManager mergeManager = shuffleServer.getShuffleMergeManager();
+    List<PartitionRange> partitionRanges = new ArrayList<>();
+    partitionRanges.add(new PartitionRange(PARTITION_ID, PARTITION_ID));
+    shuffleTaskManager.registerShuffle(
+        APP_ID, SHUFFLE_ID, partitionRanges, RemoteStorageInfo.EMPTY_REMOTE_STORAGE, USER);
+    shuffleTaskManager.registerShuffle(
+        APP_ID + ShuffleMergeManager.MERGE_APP_SUFFIX,
+        SHUFFLE_ID,
+        partitionRanges,
+        RemoteStorageInfo.EMPTY_REMOTE_STORAGE,
+        USER);
+    mergeManager.registerShuffle(
+        APP_ID,
+        SHUFFLE_ID,
+        RssProtos.MergeContext.newBuilder()
+            .setKeyClass(String.class.getName())
+            .setValueClass(Integer.class.getName())
+            .setMergedBlockSize(-1)
+            .setMergeClassLoader("")
+            .build());
+    BlockIdLayout blockIdLayout = BlockIdLayout.from(serverConf);
+    long oldMergeBlockId = blockIdLayout.getBlockId(0, PARTITION_ID, 0);
+    shuffleTaskManager.addFinishedBlockIds(
+        APP_ID + ShuffleMergeManager.MERGE_APP_SUFFIX,
+        SHUFFLE_ID,
+        ImmutableMap.of(PARTITION_ID, new long[] {oldMergeBlockId}),
+        1,
+        true,
+        0);
+    assertEquals(
+        1,
+        RssUtils.deserializeBitMap(
+                shuffleTaskManager.getFinishedBlockIds(
+                    APP_ID + ShuffleMergeManager.MERGE_APP_SUFFIX,
+                    SHUFFLE_ID,
+                    java.util.Collections.singleton(PARTITION_ID),
+                    blockIdLayout))
+            .getLongCardinality());
+
+    mergeManager.startSortMerge(
+        APP_ID, SHUFFLE_ID, PARTITION_ID, Roaring64NavigableMap.bitmapOf(), 1);
+
+    assertEquals(
+        0,
+        RssUtils.deserializeBitMap(
+                shuffleTaskManager.getFinishedBlockIds(
+                    APP_ID + ShuffleMergeManager.MERGE_APP_SUFFIX,
+                    SHUFFLE_ID,
+                    java.util.Collections.singleton(PARTITION_ID),
+                    blockIdLayout))
+            .getLongCardinality());
+  }
+
+  @org.junit.jupiter.api.Test
+  void staleMergeEventShouldNotOverwriteCurrentPartitionState() throws Exception {
+    shuffleServer = new ShuffleServer(serverConf);
+    ShuffleTaskManager shuffleTaskManager = shuffleServer.getShuffleTaskManager();
+    ShuffleMergeManager mergeManager = shuffleServer.getShuffleMergeManager();
+    List<PartitionRange> partitionRanges = new ArrayList<>();
+    partitionRanges.add(new PartitionRange(PARTITION_ID, PARTITION_ID));
+    shuffleTaskManager.registerShuffle(
+        APP_ID, SHUFFLE_ID, partitionRanges, RemoteStorageInfo.EMPTY_REMOTE_STORAGE, USER);
+    shuffleTaskManager.registerShuffle(
+        APP_ID + ShuffleMergeManager.MERGE_APP_SUFFIX,
+        SHUFFLE_ID,
+        partitionRanges,
+        RemoteStorageInfo.EMPTY_REMOTE_STORAGE,
+        USER);
+    mergeManager.registerShuffle(
+        APP_ID,
+        SHUFFLE_ID,
+        RssProtos.MergeContext.newBuilder()
+            .setKeyClass(String.class.getName())
+            .setValueClass(Integer.class.getName())
+            .setMergedBlockSize(-1)
+            .setMergeClassLoader("")
+            .build());
+    mergeManager.startSortMerge(
+        APP_ID, SHUFFLE_ID, PARTITION_ID, Roaring64NavigableMap.bitmapOf(), 2);
+    assertEquals(
+        MergeState.DONE, mergeManager.getPartition(APP_ID, SHUFFLE_ID, PARTITION_ID).getState());
+
+    mergeManager.processEvent(
+        new MergeEvent(
+            APP_ID,
+            SHUFFLE_ID,
+            PARTITION_ID,
+            1,
+            String.class,
+            Integer.class,
+            Roaring64NavigableMap.bitmapOf(1L)));
+
+    assertEquals(
+        MergeState.DONE, mergeManager.getPartition(APP_ID, SHUFFLE_ID, PARTITION_ID).getState());
   }
 
   @Timeout(10)

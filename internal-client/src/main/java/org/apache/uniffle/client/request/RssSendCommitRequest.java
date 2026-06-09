@@ -21,10 +21,16 @@ public class RssSendCommitRequest {
 
   private String appId;
   private int shuffleId;
+  private Integer stageAttemptNumber;
 
   public RssSendCommitRequest(String appId, int shuffleId) {
+    this(appId, shuffleId, null);
+  }
+
+  public RssSendCommitRequest(String appId, int shuffleId, Integer stageAttemptNumber) {
     this.appId = appId;
     this.shuffleId = shuffleId;
+    this.stageAttemptNumber = stageAttemptNumber;
   }
 
   public String getAppId() {
@@ -33,5 +39,13 @@ public class RssSendCommitRequest {
 
   public int getShuffleId() {
     return shuffleId;
+  }
+
+  public int getStageAttemptNumber() {
+    return stageAttemptNumber == null ? 0 : stageAttemptNumber;
+  }
+
+  public boolean hasStageAttemptNumber() {
+    return stageAttemptNumber != null;
   }
 }

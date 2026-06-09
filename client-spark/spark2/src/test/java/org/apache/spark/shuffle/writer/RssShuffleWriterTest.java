@@ -17,6 +17,7 @@
 
 package org.apache.spark.shuffle.writer;
 
+import java.lang.reflect.Field;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
@@ -47,6 +48,7 @@ import org.apache.spark.shuffle.RssShuffleManager;
 import org.apache.spark.shuffle.RssSparkConfig;
 import org.apache.spark.shuffle.handle.SimpleShuffleHandleInfo;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.roaringbitmap.longlong.Roaring64NavigableMap;
 
 import org.apache.uniffle.client.api.ShuffleManagerClient;
@@ -62,11 +64,17 @@ import org.apache.uniffle.storage.util.StorageType;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyMap;
+import static org.mockito.ArgumentMatchers.anySet;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 public class RssShuffleWriterTest {
@@ -509,6 +517,85 @@ public class RssShuffleWriterTest {
               0));
     }
     return shuffleBlockInfoList;
+  }
+
+  @Test
+  public void stopShouldReportCurrentStageAttemptNumber() throws Exception {
+    SparkConf conf = new SparkConf();
+    conf.set(RssSparkConfig.RSS_TEST_FLAG.key(), "true")
+        .set(RssSparkConfig.RSS_TEST_MODE_ENABLE.key(), "true")
+        .set(RssSparkConfig.RSS_STORAGE_TYPE.key(), StorageType.MEMORY_LOCALFILE.name())
+        .set(RssSparkConfig.RSS_COORDINATOR_QUORUM.key(), "127.0.0.1:12345");
+    ShuffleWriteMetrics mockMetrics = mock(ShuffleWriteMetrics.class);
+    RssShuffleManager mockShuffleManager = spy(new RssShuffleManager(conf, false));
+    RssShuffleHandle<String, String, String> mockHandle = mock(RssShuffleHandle.class);
+    ShuffleDependency<String, String, String> mockDependency = mock(ShuffleDependency.class);
+    when(mockHandle.getDependency()).thenReturn(mockDependency);
+    when(mockDependency.serializer()).thenReturn(new KryoSerializer(conf));
+    Partitioner mockPartitioner = mock(Partitioner.class);
+    when(mockDependency.partitioner()).thenReturn(mockPartitioner);
+    when(mockPartitioner.numPartitions()).thenReturn(1);
+    ShuffleWriteClient mockWriteClient = mock(ShuffleWriteClient.class);
+    when(mockWriteClient.sendCommit(anySet(), eq("appId"), eq(0), anyInt(), anyInt()))
+        .thenReturn(true);
+    ShuffleManagerClient mockShuffleManagerClient = mock(ShuffleManagerClient.class);
+    TaskContext contextMock = mock(TaskContext.class);
+    when(contextMock.stageAttemptNumber()).thenReturn(4);
+    SimpleShuffleHandleInfo mockShuffleHandleInfo = mock(SimpleShuffleHandleInfo.class);
+    WriteBufferManager bufferManager = mock(WriteBufferManager.class);
+    RssShuffleWriter<String, String, String> writer =
+        new RssShuffleWriter<>(
+            "appId",
+            0,
+            "taskId",
+            1L,
+            bufferManager,
+            mockMetrics,
+            mockShuffleManager,
+            conf,
+            mockWriteClient,
+            ExpiringCloseableSupplier.of(() -> mockShuffleManagerClient),
+            mockHandle,
+            mockShuffleHandleInfo,
+            contextMock);
+    setServerToPartitionToBlockIds(writer, createServerToPartitionToBlockIds());
+
+    writer.stop(true);
+
+    ArgumentCaptor<Integer> stageAttemptCaptor = ArgumentCaptor.forClass(Integer.class);
+    verify(mockWriteClient)
+        .reportShuffleResult(
+            anyMap(),
+            eq("appId"),
+            eq(0),
+            eq(1L),
+            anyInt(),
+            stageAttemptCaptor.capture(),
+            anySet(),
+            anyBoolean());
+    assertEquals(4, stageAttemptCaptor.getValue());
+
+    writer.sendCommit();
+    verify(mockWriteClient).sendCommit(anySet(), eq("appId"), eq(0), anyInt(), eq(4));
+  }
+
+  private void setServerToPartitionToBlockIds(
+      RssShuffleWriter<?, ?, ?> writer,
+      Map<ShuffleServerInfo, Map<Integer, Set<Long>>> serverToPartitionToBlockIds)
+      throws Exception {
+    Field field = RssShuffleWriter.class.getDeclaredField("serverToPartitionToBlockIds");
+    field.setAccessible(true);
+    field.set(writer, serverToPartitionToBlockIds);
+  }
+
+  private Map<ShuffleServerInfo, Map<Integer, Set<Long>>> createServerToPartitionToBlockIds() {
+    Map<Integer, Set<Long>> partitionToBlockIds = Maps.newHashMap();
+    partitionToBlockIds.put(0, Sets.newHashSet(10L));
+    Map<ShuffleServerInfo, Map<Integer, Set<Long>>> serverToPartitionToBlockIds =
+        Maps.newHashMap();
+    serverToPartitionToBlockIds.put(
+        new ShuffleServerInfo("id1", "host1", 100), partitionToBlockIds);
+    return serverToPartitionToBlockIds;
   }
 
   /**

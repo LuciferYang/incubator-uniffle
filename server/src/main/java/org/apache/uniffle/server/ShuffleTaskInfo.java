@@ -52,6 +52,7 @@ public class ShuffleTaskInfo {
   private Map<Integer, AtomicInteger> commitCounts;
 
   private Map<Integer, Object> commitLocks;
+  private Map<Integer, Object> stageAttemptLocks;
   /** shuffleId -> blockIds */
   private Map<Integer, AtomicLong> cachedBlockCount;
 
@@ -82,6 +83,8 @@ public class ShuffleTaskInfo {
   private final Map<Integer, ShuffleDetailInfo> shuffleDetailInfos;
 
   private final Map<Integer, Integer> latestStageAttemptNumbers;
+  private final Map<Integer, Integer> latestStageAttemptNumbersForShuffleResult;
+  private final Map<Integer, Integer> minStageAttemptNumbersForShuffleResult;
   private Map<String, String> properties;
   private ShuffleBlockIdManager shuffleBlockIdManager;
 
@@ -90,6 +93,7 @@ public class ShuffleTaskInfo {
     this.currentTimes = System.currentTimeMillis();
     this.commitCounts = JavaUtils.newConcurrentMap();
     this.commitLocks = JavaUtils.newConcurrentMap();
+    this.stageAttemptLocks = JavaUtils.newConcurrentMap();
     this.cachedBlockCount = JavaUtils.newConcurrentMap();
     this.user = new AtomicReference<>();
     this.partitionDataSizes = JavaUtils.newConcurrentMap();
@@ -98,6 +102,8 @@ public class ShuffleTaskInfo {
     this.specification = new AtomicReference<>();
     this.partitionBlockCounters = JavaUtils.newConcurrentMap();
     this.latestStageAttemptNumbers = JavaUtils.newConcurrentMap();
+    this.latestStageAttemptNumbersForShuffleResult = JavaUtils.newConcurrentMap();
+    this.minStageAttemptNumbersForShuffleResult = JavaUtils.newConcurrentMap();
     this.shuffleDetailInfos = JavaUtils.newConcurrentMap();
   }
 
@@ -115,6 +121,10 @@ public class ShuffleTaskInfo {
 
   public Map<Integer, Object> getCommitLocks() {
     return commitLocks;
+  }
+
+  public Object getStageAttemptLock(int shuffleId) {
+    return stageAttemptLocks.computeIfAbsent(shuffleId, key -> new Object());
   }
 
   public Map<Integer, AtomicLong> getCachedBlockCount() {
@@ -303,7 +313,103 @@ public class ShuffleTaskInfo {
   }
 
   public void refreshLatestStageAttemptNumber(int shuffleId, int stageAttemptNumber) {
-    latestStageAttemptNumbers.put(shuffleId, stageAttemptNumber);
+    latestStageAttemptNumbers.compute(
+        shuffleId,
+        (key, oldValue) ->
+            oldValue == null ? stageAttemptNumber : Math.max(oldValue, stageAttemptNumber));
+  }
+
+  public boolean isNewerStageAttempt(int shuffleId, int stageAttemptNumber) {
+    return stageAttemptNumber > getLatestStageAttemptNumber(shuffleId);
+  }
+
+  public Integer getLatestShuffleResultStageAttemptNumber(int shuffleId) {
+    return latestStageAttemptNumbersForShuffleResult.getOrDefault(shuffleId, -1);
+  }
+
+  public void refreshLatestShuffleResultStageAttemptNumber(
+      int shuffleId, int stageAttemptNumber) {
+    latestStageAttemptNumbersForShuffleResult.compute(
+        shuffleId,
+        (key, oldValue) ->
+            oldValue == null ? stageAttemptNumber : Math.max(oldValue, stageAttemptNumber));
+  }
+
+  public void markShuffleResultCleaned(int shuffleId) {
+    markShuffleResultCleaned(shuffleId, getLatestStageAttemptNumber(shuffleId));
+  }
+
+  public void markShuffleResultCleaned(int shuffleId, int stageAttemptNumber) {
+    markShuffleResultFence(shuffleId, stageAttemptNumber);
+  }
+
+  public void markShuffleResultFence(int shuffleId, int stageAttemptNumber) {
+    latestStageAttemptNumbers.compute(
+        shuffleId,
+        (key, oldValue) -> {
+          int nextStageAttemptNumber = stageAttemptNumber + 1;
+          return oldValue == null
+              ? nextStageAttemptNumber
+              : Math.max(oldValue, nextStageAttemptNumber);
+        });
+    markShuffleResultFenceOnly(shuffleId, stageAttemptNumber);
+  }
+
+  public void markShuffleResultFenceOnly(int shuffleId, int stageAttemptNumber) {
+    AtomicInteger minStageAttemptNumber = new AtomicInteger(stageAttemptNumber + 1);
+    minStageAttemptNumbersForShuffleResult.compute(
+        shuffleId,
+        (key, oldValue) ->
+            oldValue == null
+                ? minStageAttemptNumber.get()
+                : Math.max(oldValue, minStageAttemptNumber.get()));
+  }
+
+  public boolean acceptShuffleResult(
+      int shuffleId, boolean hasStageAttemptNumber, int stageAttemptNumber) {
+    if (!acceptStageAttempt(shuffleId, hasStageAttemptNumber, stageAttemptNumber)) {
+      return false;
+    }
+    return !hasStageAttemptNumber || stageAttemptNumber >= getLatestStageAttemptNumber(shuffleId);
+  }
+
+  public boolean acceptStageAttempt(
+      int shuffleId, boolean hasStageAttemptNumber, int stageAttemptNumber) {
+    Integer minStageAttemptNumber = minStageAttemptNumbersForShuffleResult.get(shuffleId);
+    if (!hasStageAttemptNumber) {
+      return minStageAttemptNumber == null;
+    }
+    if (minStageAttemptNumber != null && stageAttemptNumber < minStageAttemptNumber) {
+      return false;
+    }
+    return true;
+  }
+
+  public void removeShuffleResources(int shuffleId) {
+    cachedBlockCount.remove(shuffleId);
+    commitCounts.remove(shuffleId);
+    commitLocks.remove(shuffleId);
+    partitionDataSizes.remove(shuffleId);
+    hugePartitionTags.remove(shuffleId);
+    partitionBlockCounters.remove(shuffleId);
+    shuffleDetailInfos.remove(shuffleId);
+    latestStageAttemptNumbersForShuffleResult.remove(shuffleId);
+  }
+
+  public void removeShuffleResultResources(int shuffleId) {
+    partitionBlockCounters.remove(shuffleId);
+    shuffleDetailInfos.remove(shuffleId);
+  }
+
+  public void removeStageAttemptMutableResources(int shuffleId) {
+    cachedBlockCount.remove(shuffleId);
+    commitCounts.remove(shuffleId);
+    commitLocks.remove(shuffleId);
+    partitionDataSizes.remove(shuffleId);
+    hugePartitionTags.remove(shuffleId);
+    partitionBlockCounters.remove(shuffleId);
+    shuffleDetailInfos.remove(shuffleId);
+    latestStageAttemptNumbersForShuffleResult.remove(shuffleId);
   }
 
   public PartitionInfo getMaxSizePartitionInfo() {

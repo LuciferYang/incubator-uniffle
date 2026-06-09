@@ -380,7 +380,7 @@ public class RssShuffleManager extends RssShuffleManagerBase {
         () ->
             getShuffleHandleInfo(
                 context.stageId(), context.stageAttemptNumber(), rssShuffleHandle, false);
-    if (readShuffleHandleCacheEnabled) {
+    if (shouldCacheReadShuffleHandle()) {
       shuffleHandleInfo = super.getOrFetchShuffleHandle(shuffleId, func);
     } else {
       shuffleHandleInfo = func.get();

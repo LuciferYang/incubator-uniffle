@@ -22,12 +22,33 @@ import org.apache.uniffle.proto.RssProtos;
 
 public class RssReportShuffleResultResponse extends ClientResponse {
 
+  private final boolean stageAttemptAccepted;
+  private final boolean hasStageAttemptAccepted;
+
   public RssReportShuffleResultResponse(StatusCode statusCode) {
+    this(statusCode, false, false);
+  }
+
+  public RssReportShuffleResultResponse(
+      StatusCode statusCode, boolean stageAttemptAccepted, boolean hasStageAttemptAccepted) {
     super(statusCode);
+    this.stageAttemptAccepted = stageAttemptAccepted;
+    this.hasStageAttemptAccepted = hasStageAttemptAccepted;
   }
 
   public static RssReportShuffleResultResponse fromProto(
       RssProtos.ReportShuffleResultResponse rpcResponse) {
-    return new RssReportShuffleResultResponse(StatusCode.fromProto(rpcResponse.getStatus()));
+    return new RssReportShuffleResultResponse(
+        StatusCode.fromProto(rpcResponse.getStatus()),
+        rpcResponse.getStageAttemptAccepted(),
+        rpcResponse.hasStageAttemptAccepted());
+  }
+
+  public boolean isStageAttemptAccepted() {
+    return stageAttemptAccepted;
+  }
+
+  public boolean hasStageAttemptAccepted() {
+    return hasStageAttemptAccepted;
   }
 }

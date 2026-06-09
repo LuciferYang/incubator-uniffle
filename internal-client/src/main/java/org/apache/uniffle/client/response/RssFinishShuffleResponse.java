@@ -21,7 +21,23 @@ import org.apache.uniffle.common.rpc.StatusCode;
 
 public class RssFinishShuffleResponse extends ClientResponse {
 
+  private boolean stageAttemptAccepted;
+  private boolean hasStageAttemptAccepted;
+
   public RssFinishShuffleResponse(StatusCode statusCode) {
     super(statusCode);
+  }
+
+  public boolean isStageAttemptAccepted() {
+    return stageAttemptAccepted;
+  }
+
+  public void setStageAttemptAccepted(boolean stageAttemptAccepted) {
+    this.stageAttemptAccepted = stageAttemptAccepted;
+    this.hasStageAttemptAccepted = true;
+  }
+
+  public boolean hasStageAttemptAccepted() {
+    return hasStageAttemptAccepted;
   }
 }

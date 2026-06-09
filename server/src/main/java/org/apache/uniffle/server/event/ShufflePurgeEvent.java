@@ -21,12 +21,32 @@ import java.util.List;
 
 public class ShufflePurgeEvent extends PurgeEvent {
 
+  private final Integer stageAttemptNumber;
+
   public ShufflePurgeEvent(String appId, String user, List<Integer> shuffleIds) {
     this(appId, user, shuffleIds, false);
   }
 
   public ShufflePurgeEvent(
       String appId, String user, List<Integer> shuffleIds, boolean isRenameAndDelete) {
+    this(appId, user, shuffleIds, isRenameAndDelete, null);
+  }
+
+  public ShufflePurgeEvent(
+      String appId,
+      String user,
+      List<Integer> shuffleIds,
+      boolean isRenameAndDelete,
+      Integer stageAttemptNumber) {
     super(appId, user, shuffleIds, isRenameAndDelete);
+    this.stageAttemptNumber = stageAttemptNumber;
+  }
+
+  public Integer getStageAttemptNumber() {
+    return stageAttemptNumber;
+  }
+
+  public boolean hasStageAttemptNumber() {
+    return stageAttemptNumber != null;
   }
 }

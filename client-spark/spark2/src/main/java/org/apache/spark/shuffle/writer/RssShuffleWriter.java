@@ -75,6 +75,7 @@ import org.apache.uniffle.common.ShuffleServerInfo;
 import org.apache.uniffle.common.exception.RssException;
 import org.apache.uniffle.common.exception.RssSendFailedException;
 import org.apache.uniffle.common.exception.RssWaitFailedException;
+import org.apache.uniffle.common.rpc.StatusCode;
 import org.apache.uniffle.storage.util.StorageType;
 
 import static org.apache.spark.shuffle.RssSparkConfig.RSS_RESUBMIT_STAGE_WITH_WRITE_FAILURE_ENABLED;
@@ -415,7 +416,13 @@ public class RssShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
     ExecutorService executor = Executors.newSingleThreadExecutor();
     Future<Boolean> future =
         executor.submit(
-            () -> shuffleWriteClient.sendCommit(shuffleServersForData, appId, shuffleId, numMaps));
+            () ->
+                shuffleWriteClient.sendCommit(
+                    shuffleServersForData,
+                    appId,
+                    shuffleId,
+                    numMaps,
+                    taskContext.stageAttemptNumber()));
     long start = System.currentTimeMillis();
     int currentWait = 200;
     int maxWait = 5000;
@@ -532,6 +539,7 @@ public class RssShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
             shuffleId,
             taskAttemptId,
             bitmapSplitNum,
+            taskContext.stageAttemptNumber(),
             recordReportFailedShuffleservers,
             enableWriteFailureRetry);
         long reportDuration = System.currentTimeMillis() - start;
@@ -623,6 +631,14 @@ public class RssShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
             RssSparkShuffleUtils.createFetchFailedException(
                 shuffleId, -1, taskContext.stageAttemptNumber(), e);
         throw new RssException(ffe);
+      }
+      if (response.getStatusCode() != StatusCode.SUCCESS) {
+        throw new RssException(
+            "Report shuffle write failure failed: "
+                + response.getStatusCode()
+                + ", "
+                + response.getMessage(),
+            e);
       }
     }
     throw new RssException(e);

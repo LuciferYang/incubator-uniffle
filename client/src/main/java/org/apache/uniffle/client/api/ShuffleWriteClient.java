@@ -42,9 +42,7 @@ public interface ShuffleWriteClient {
       int stageAttemptNumber,
       List<ShuffleBlockInfo> shuffleBlockInfoList,
       Supplier<Boolean> needCancelRequest) {
-    throw new UnsupportedOperationException(
-        this.getClass().getName()
-            + " doesn't implement getShuffleAssignments with faultyServerIds");
+    return sendShuffleData(appId, shuffleBlockInfoList, needCancelRequest);
   }
 
   SendShuffleDataResult sendShuffleData(
@@ -132,6 +130,15 @@ public interface ShuffleWriteClient {
   boolean sendCommit(
       Set<ShuffleServerInfo> shuffleServerInfoSet, String appId, int shuffleId, int numMaps);
 
+  default boolean sendCommit(
+      Set<ShuffleServerInfo> shuffleServerInfoSet,
+      String appId,
+      int shuffleId,
+      int numMaps,
+      int stageAttemptNumber) {
+    return sendCommit(shuffleServerInfoSet, appId, shuffleId, numMaps);
+  }
+
   @Deprecated
   default void registerCoordinators(String coordinators) {
     registerCoordinators(coordinators, 0, 0);
@@ -156,6 +163,16 @@ public interface ShuffleWriteClient {
       int shuffleId,
       long taskAttemptId,
       int bitmapNum,
+      int stageAttemptNumber) {
+    reportShuffleResult(serverToPartitionToBlockIds, appId, shuffleId, taskAttemptId, bitmapNum);
+  }
+
+  default void reportShuffleResult(
+      Map<ShuffleServerInfo, Map<Integer, Set<Long>>> serverToPartitionToBlockIds,
+      String appId,
+      int shuffleId,
+      long taskAttemptId,
+      int bitmapNum,
       Set<ShuffleServerInfo> reportFailureServers,
       boolean enableWriteFailureRetry,
       Map<ShuffleServerInfo, Map<Integer, Long>> serverToPartitionToRecordNumbers) {
@@ -170,8 +187,48 @@ public interface ShuffleWriteClient {
       int shuffleId,
       long taskAttemptId,
       int bitmapNum,
+      int stageAttemptNumber,
+      Set<ShuffleServerInfo> reportFailureServers,
+      boolean enableWriteFailureRetry,
+      Map<ShuffleServerInfo, Map<Integer, Long>> serverToPartitionToRecordNumbers) {
+    reportShuffleResult(
+        serverToPartitionToBlockIds,
+        appId,
+        shuffleId,
+        taskAttemptId,
+        bitmapNum,
+        reportFailureServers,
+        enableWriteFailureRetry,
+        serverToPartitionToRecordNumbers);
+  }
+
+  default void reportShuffleResult(
+      Map<ShuffleServerInfo, Map<Integer, Set<Long>>> serverToPartitionToBlockIds,
+      String appId,
+      int shuffleId,
+      long taskAttemptId,
+      int bitmapNum,
       Set<ShuffleServerInfo> reportFailureServers,
       boolean enableWriteFailureRetry) {}
+
+  default void reportShuffleResult(
+      Map<ShuffleServerInfo, Map<Integer, Set<Long>>> serverToPartitionToBlockIds,
+      String appId,
+      int shuffleId,
+      long taskAttemptId,
+      int bitmapNum,
+      int stageAttemptNumber,
+      Set<ShuffleServerInfo> reportFailureServers,
+      boolean enableWriteFailureRetry) {
+    reportShuffleResult(
+        serverToPartitionToBlockIds,
+        appId,
+        shuffleId,
+        taskAttemptId,
+        bitmapNum,
+        reportFailureServers,
+        enableWriteFailureRetry);
+  }
 
   ShuffleAssignmentsInfo getShuffleAssignments(
       String appId,
@@ -255,6 +312,10 @@ public interface ShuffleWriteClient {
 
   void unregisterShuffle(String appId, int shuffleId);
 
+  default void unregisterShuffle(String appId, int shuffleId, int stageAttemptNumber) {
+    unregisterShuffle(appId, shuffleId);
+  }
+
   void unregisterShuffle(String appId);
 
   void startSortMerge(
@@ -263,4 +324,14 @@ public interface ShuffleWriteClient {
       int shuffleId,
       int partitionId,
       Roaring64NavigableMap expectedTaskIds);
+
+  default void startSortMerge(
+      Set<ShuffleServerInfo> serverInfos,
+      String appId,
+      int shuffleId,
+      int partitionId,
+      Roaring64NavigableMap expectedTaskIds,
+      int stageAttemptNumber) {
+    startSortMerge(serverInfos, appId, shuffleId, partitionId, expectedTaskIds);
+  }
 }

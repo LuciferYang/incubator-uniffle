@@ -24,6 +24,7 @@ public class MergeEvent {
   private final String appId;
   private final int shuffleId;
   private final int partitionId;
+  private final Integer stageAttemptNumber;
   private final Class kClass;
   private final Class vClass;
   private Roaring64NavigableMap expectedBlockIdMap;
@@ -32,12 +33,14 @@ public class MergeEvent {
       String appId,
       int shuffleId,
       int partitionId,
+      Integer stageAttemptNumber,
       Class kClass,
       Class vClass,
       Roaring64NavigableMap expectedBlockIdMap) {
     this.appId = appId;
     this.shuffleId = shuffleId;
     this.partitionId = partitionId;
+    this.stageAttemptNumber = stageAttemptNumber;
     this.kClass = kClass;
     this.vClass = vClass;
     this.expectedBlockIdMap = expectedBlockIdMap;
@@ -53,6 +56,14 @@ public class MergeEvent {
 
   public int getPartitionId() {
     return partitionId;
+  }
+
+  public int getStageAttemptNumber() {
+    return stageAttemptNumber == null ? 0 : stageAttemptNumber;
+  }
+
+  public boolean hasStageAttemptNumber() {
+    return stageAttemptNumber != null;
   }
 
   public Roaring64NavigableMap getExpectedBlockIdMap() {
@@ -77,6 +88,8 @@ public class MergeEvent {
         + shuffleId
         + ", partitionId="
         + partitionId
+        + ", stageAttemptNumber="
+        + stageAttemptNumber
         + ", kClass="
         + kClass
         + ", vClass="

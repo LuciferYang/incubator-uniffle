@@ -26,6 +26,7 @@ import org.apache.spark.shuffle.handle.ShuffleHandleInfo;
 
 import org.apache.uniffle.client.api.ShuffleWriteClient;
 import org.apache.uniffle.common.ReceivingFailureServer;
+import org.apache.uniffle.common.exception.RssException;
 import org.apache.uniffle.shuffle.BlockIdManager;
 
 /**
@@ -57,6 +58,39 @@ public interface RssShuffleManagerInterface {
    * @throws SparkException
    */
   void unregisterAllMapOutput(int shuffleId) throws SparkException;
+
+  /**
+   * Unregister shuffle data from shuffle servers for write-failure retry while preserving all driver
+   * shuffle metadata until Spark MapOutputTracker cleanup succeeds.
+   *
+   * <p>This is intentionally narrower than {@code unregisterShuffle}: callers must not remove
+   * partition or map-task metadata used by {@code reassignOnStageResubmit}. MapOutputTracker and
+   * local block-id cleanup are handled separately.
+   *
+   * @param shuffleId the shuffle id to unregister
+   */
+  default void unregisterShuffleDataForWriteFailure(int shuffleId) {
+    unregisterShuffleDataForWriteFailure(shuffleId, 0);
+  }
+
+  default void unregisterShuffleDataForWriteFailure(int shuffleId, int stageAttemptNumber) {
+    ShuffleWriteClient shuffleWriteClient = getShuffleWriteClient();
+    if (shuffleWriteClient == null) {
+      throw new RssException(
+          "Cannot unregister shuffle data for write failure because ShuffleWriteClient is null, appId="
+              + getAppId()
+              + ", shuffleId="
+              + shuffleId);
+    }
+    shuffleWriteClient.unregisterShuffle(getAppId(), shuffleId, stageAttemptNumber);
+  }
+
+  default void clearShuffleDataForWriteFailure(int shuffleId) {
+    BlockIdManager blockIdManager = getBlockIdManager();
+    if (blockIdManager != null) {
+      blockIdManager.remove(shuffleId);
+    }
+  }
 
   BlockIdManager getBlockIdManager();
 

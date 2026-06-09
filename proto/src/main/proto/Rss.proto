@@ -45,11 +45,13 @@ service ShuffleServer {
 message FinishShuffleRequest {
   string appId = 1;
   int32 shuffleId = 2;
+  optional int32 stageAttemptNumber = 3;
 }
 
 message FinishShuffleResponse {
   StatusCode status = 1;
   string retMsg = 2;
+  optional bool stageAttemptAccepted = 3;
 }
 
 message RequireBufferRequest {
@@ -142,6 +144,7 @@ message ReportShuffleResultRequest {
   int32 bitmapNum = 4;
   repeated PartitionToBlockIds partitionToBlockIds = 5;
   repeated PartitionStats partitionStats = 6;
+  optional int32 stageAttemptNumber = 7;
 }
 
 message PartitionToBlockIds {
@@ -152,6 +155,7 @@ message PartitionToBlockIds {
 message ReportShuffleResultResponse {
   StatusCode status = 1;
   string retMsg = 2;
+  optional bool stageAttemptAccepted = 3;
 }
 
 message GetShuffleResultRequest {
@@ -230,11 +234,13 @@ enum DataDistribution {
 message ShuffleUnregisterRequest {
   string appId = 1;
   int32 shuffleId = 2;
+  optional int32 stageAttemptNumber = 3;
 }
 
 message ShuffleUnregisterResponse {
   StatusCode status = 1;
   string retMsg = 2;
+  optional bool stageAttemptCleanupCompleted = 3;
 }
 
 message ShuffleRegisterResponse {
@@ -282,12 +288,14 @@ message ShuffleBlock {
 message ShuffleCommitRequest {
   string appId = 1;
   int32 shuffleId = 2;
+  optional int32 stageAttemptNumber = 3;
 }
 
 message ShuffleCommitResponse {
   int32 commitCount = 1;
   StatusCode status = 2;
   string retMsg = 3;
+  optional bool stageAttemptAccepted = 4;
 }
 
 enum ServerStatus {
@@ -812,11 +820,13 @@ message StartSortMergeRequest {
   int32 shuffleId = 2;
   int32 partitionId = 3;
   bytes uniqueBlocksBitmap = 4;
+  optional int32 stageAttemptNumber = 5;
 }
 
 message StartSortMergeResponse {
   StatusCode status = 1;
   string retMsg = 2;
+  optional bool stageAttemptAccepted = 3;
 }
 
 message GetSortedShuffleDataRequest {

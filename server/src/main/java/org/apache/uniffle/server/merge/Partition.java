@@ -77,6 +77,8 @@ public class Partition<K, V> {
   private final int partitionId;
 
   private MergeState state = MergeState.INITED;
+  private Integer stageAttemptNumber;
+  private final ThreadLocal<Integer> activeStageAttemptNumber = new ThreadLocal<>();
   private MergedResult result;
   private ShuffleMeta shuffleMeta = new ShuffleMeta();
 
@@ -108,10 +110,39 @@ public class Partition<K, V> {
   }
 
   // startSortMerge is used to trigger to merger
-  synchronized void startSortMerge(Roaring64NavigableMap expectedBlockIdMap) {
+  synchronized StatusCode startSortMerge(Roaring64NavigableMap expectedBlockIdMap) {
+    return startSortMerge(expectedBlockIdMap, null);
+  }
+
+  // startSortMerge is used to trigger to merger
+  synchronized StatusCode startSortMerge(
+      Roaring64NavigableMap expectedBlockIdMap, Integer stageAttemptNumber) {
+    if (stageAttemptNumber != null) {
+      if (this.stageAttemptNumber != null && stageAttemptNumber < this.stageAttemptNumber) {
+        LOG.warn(
+            "Ignore stale startSortMerge for partition {}, stageAttemptNumber {}, current stageAttemptNumber {}.",
+            this,
+            stageAttemptNumber,
+            this.stageAttemptNumber);
+        return StatusCode.STAGE_RETRY_IGNORE;
+      }
+      if (this.stageAttemptNumber == null || stageAttemptNumber > this.stageAttemptNumber) {
+        cleanupOlderStageAttemptResources(stageAttemptNumber);
+        cleanup();
+        this.result =
+            new MergedResult(
+                shuffle.serverConf, this::cachedMergedBlock, shuffle.mergedBlockSize, this);
+        this.shuffleMeta = new ShuffleMeta();
+        setState(INITED);
+        this.stageAttemptNumber = stageAttemptNumber;
+      }
+    }
     if (getState() != INITED) {
       LOG.warn("Partition is already merging, so ignore duplicate reports, partition is {}", this);
     } else {
+      if (stageAttemptNumber != null) {
+        this.stageAttemptNumber = stageAttemptNumber;
+      }
       if (!expectedBlockIdMap.isEmpty()) {
         setState(MERGING);
         MergeEvent event =
@@ -119,15 +150,38 @@ public class Partition<K, V> {
                 shuffle.appId,
                 shuffle.shuffleId,
                 partitionId,
+                stageAttemptNumber,
                 shuffle.kClass,
                 shuffle.vClass,
                 expectedBlockIdMap);
         if (!shuffle.eventHandler.handle(event)) {
           setState(INTERNAL_ERROR);
+          return StatusCode.INTERNAL_ERROR;
         }
       } else {
         setState(DONE);
       }
+    }
+    return StatusCode.SUCCESS;
+  }
+
+  private void cleanupOlderStageAttemptResources(int nextStageAttemptNumber) {
+    if (shuffle.shuffleServer == null || nextStageAttemptNumber <= 0) {
+      return;
+    }
+    String mergeAppId = shuffle.appId + MERGE_APP_SUFFIX;
+    boolean cleanupCompleted =
+        shuffle
+            .shuffleServer
+            .getShuffleTaskManager()
+            .removeShuffleDataSync(mergeAppId, shuffle.shuffleId, nextStageAttemptNumber - 1, true);
+    if (!cleanupCompleted) {
+      LOG.warn(
+          "No old remote merge resources were cleaned for appId[{}], shuffleId[{}], partitionId[{}], nextStageAttemptNumber[{}].",
+          mergeAppId,
+          shuffle.shuffleId,
+          partitionId,
+          nextStageAttemptNumber);
     }
   }
 
@@ -228,8 +282,21 @@ public class Partition<K, V> {
     return result.getOutputStream(shuffle.direct, totalBytes);
   }
 
-  void merge(List<Segment> segments, SerOutputStream output, BlockFlushFileReader reader) {
+  void merge(
+      List<Segment> segments,
+      SerOutputStream output,
+      BlockFlushFileReader reader,
+      Integer stageAttemptNumber) {
     try {
+      if (!isCurrentStageAttempt(stageAttemptNumber)) {
+        LOG.warn(
+            "Ignore stale merge event for {}, eventStageAttemptNumber={}, currentStageAttemptNumber={}.",
+            this,
+            stageAttemptNumber,
+            this.stageAttemptNumber);
+        return;
+      }
+      activeStageAttemptNumber.set(stageAttemptNumber);
       segments.forEach(segment -> segment.init());
       // start reader must happen after init segment to allocate ring buffer.
       if (reader != null) {
@@ -243,10 +310,20 @@ public class Partition<K, V> {
           shuffle.vClass,
           shuffle.comparator,
           (shuffle.comparator instanceof RawComparator));
-      setState(DONE);
+      if (isCurrentStageAttempt(stageAttemptNumber)) {
+        setState(DONE);
+      } else {
+        LOG.warn(
+            "Skip setting DONE for stale merge event {}, eventStageAttemptNumber={}, currentStageAttemptNumber={}.",
+            this,
+            stageAttemptNumber,
+            this.stageAttemptNumber);
+      }
     } catch (Exception e) {
       LOG.info("Found exception when merge for {}, caused by", this, e);
-      setState(INTERNAL_ERROR);
+      if (isCurrentStageAttempt(stageAttemptNumber)) {
+        setState(INTERNAL_ERROR);
+      }
     } finally {
       try {
         if (reader != null) {
@@ -268,17 +345,25 @@ public class Partition<K, V> {
               LOG.warn("Fail to close segment, caused by ", ioe);
             }
           });
+      activeStageAttemptNumber.remove();
     }
   }
 
-  public void setState(MergeState state) {
+  public synchronized void setState(MergeState state) {
     if (LOG.isDebugEnabled()) {
       LOG.debug("Partition is {}, transient from {} to {}.", this, this.state.name(), state.name());
     }
     this.state = state;
   }
 
-  public MergeState getState() {
+  synchronized boolean isCurrentStageAttempt(Integer eventStageAttemptNumber) {
+    if (stageAttemptNumber == null) {
+      return eventStageAttemptNumber == null;
+    }
+    return eventStageAttemptNumber != null && stageAttemptNumber.equals(eventStageAttemptNumber);
+  }
+
+  public synchronized MergeState getState() {
     return state;
   }
 
@@ -317,20 +402,44 @@ public class Partition<K, V> {
   // original way, cache them first, and flush them to disk when necessary.
   private boolean cachedMergedBlock(ByteBuf byteBuf, long blockId, int length) {
     String appId = shuffle.appId + MERGE_APP_SUFFIX;
+    if (!isCurrentStageAttempt(activeStageAttemptNumber.get())) {
+      LOG.warn(
+          "Ignore stale merged block for appId[{}], shuffleId[{}], partitionId[{}], blockId[{}], eventStageAttemptNumber[{}], currentStageAttemptNumber[{}].",
+          appId,
+          shuffle.shuffleId,
+          partitionId,
+          blockId,
+          activeStageAttemptNumber.get(),
+          stageAttemptNumber);
+      return false;
+    }
     ShufflePartitionedBlock spb =
         new ShufflePartitionedBlock(length, length, -1, blockId, -1, byteBuf.retain());
     ShufflePartitionedData spd =
         new ShufflePartitionedData(partitionId, new ShufflePartitionedBlock[] {spb});
     StatusCode ret =
+        activeStageAttemptNumber.get() == null
+            ? shuffle
+                .shuffleServer
+                .getShuffleTaskManager()
+                .cacheShuffleData(appId, shuffle.shuffleId, true, spd)
+            : shuffle
+                .shuffleServer
+                .getShuffleTaskManager()
+                .cacheShuffleData(
+                    appId,
+                    shuffle.shuffleId,
+                    activeStageAttemptNumber.get(),
+                    true,
+                    spd.getPartitionId(),
+                    spd);
+    if (ret == StatusCode.SUCCESS) {
+      if (activeStageAttemptNumber.get() == null) {
         shuffle
             .shuffleServer
             .getShuffleTaskManager()
-            .cacheShuffleData(appId, shuffle.shuffleId, true, spd);
-    if (ret == StatusCode.SUCCESS) {
-      shuffle
-          .shuffleServer
-          .getShuffleTaskManager()
-          .updateCachedBlockIds(appId, shuffle.shuffleId, spd.getPartitionId(), spd);
+            .updateCachedBlockIds(appId, shuffle.shuffleId, spd.getPartitionId(), spd);
+      }
       sleepTime = initSleepTime;
       return true;
     } else {

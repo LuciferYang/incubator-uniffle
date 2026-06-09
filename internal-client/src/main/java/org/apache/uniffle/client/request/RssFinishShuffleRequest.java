@@ -21,10 +21,16 @@ public class RssFinishShuffleRequest {
 
   private String appId;
   private int shuffleId;
+  private Integer stageAttemptNumber;
 
   public RssFinishShuffleRequest(String appId, int shuffleId) {
+    this(appId, shuffleId, null);
+  }
+
+  public RssFinishShuffleRequest(String appId, int shuffleId, Integer stageAttemptNumber) {
     this.appId = appId;
     this.shuffleId = shuffleId;
+    this.stageAttemptNumber = stageAttemptNumber;
   }
 
   public String getAppId() {
@@ -33,5 +39,13 @@ public class RssFinishShuffleRequest {
 
   public int getShuffleId() {
     return shuffleId;
+  }
+
+  public int getStageAttemptNumber() {
+    return stageAttemptNumber == null ? 0 : stageAttemptNumber;
+  }
+
+  public boolean hasStageAttemptNumber() {
+    return stageAttemptNumber != null;
   }
 }

@@ -296,17 +296,6 @@ public class LocalStorageManager extends SingleStorageManager {
     List<Integer> shuffleSet =
         Optional.ofNullable(event.getShuffleIds()).orElse(Collections.emptyList());
 
-    // Remove partitions to storage mapping cache
-    cleanupStorageSelectionCache(event);
-
-    for (LocalStorage storage : localStorages) {
-      if (event instanceof AppPurgeEvent) {
-        storage.removeHandlers(appId);
-      }
-      for (Integer shuffleId : shuffleSet) {
-        storage.removeResources(RssUtils.generateShuffleKey(appId, shuffleId));
-      }
-    }
     // delete shuffle data for application
     ShuffleDeleteHandler deleteHandler =
         ShuffleHandlerFactory.getInstance()
@@ -357,6 +346,22 @@ public class LocalStorageManager extends SingleStorageManager {
         deleteHandler.delete(deletePaths.toArray(new String[deletePaths.size()]), appId, user);
     if (!isSuccess && event.isRenameAndDelete()) {
       ShuffleServerMetrics.counterLocalRenameAndDeletionFaileTd.inc();
+    }
+    if (!isSuccess) {
+      throw new RssException(
+          "Failed to delete shuffle data for appId[" + appId + "] with paths " + deletePaths);
+    }
+
+    // Remove partitions to storage mapping cache after storage deletion succeeds.
+    cleanupStorageSelectionCache(event);
+
+    for (LocalStorage storage : localStorages) {
+      if (event instanceof AppPurgeEvent) {
+        storage.removeHandlers(appId);
+      }
+      for (Integer shuffleId : shuffleSet) {
+        storage.removeResources(RssUtils.generateShuffleKey(appId, shuffleId));
+      }
     }
     removeAppStorageInfo(event);
   }

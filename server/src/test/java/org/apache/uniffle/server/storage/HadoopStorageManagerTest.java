@@ -28,13 +28,18 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.mockito.MockedStatic;
+import org.mockito.Mockito;
 
+import org.apache.uniffle.common.exception.RssException;
 import org.apache.uniffle.common.RemoteStorageInfo;
 import org.apache.uniffle.server.ShuffleServerConf;
 import org.apache.uniffle.server.ShuffleServerMetrics;
 import org.apache.uniffle.server.event.AppPurgeEvent;
 import org.apache.uniffle.server.event.ShufflePurgeEvent;
 import org.apache.uniffle.storage.common.HadoopStorage;
+import org.apache.uniffle.storage.factory.ShuffleHandlerFactory;
+import org.apache.uniffle.storage.handler.api.ShuffleDeleteHandler;
 import org.apache.uniffle.storage.util.ShuffleStorageUtils;
 import org.apache.uniffle.storage.util.StorageType;
 
@@ -42,7 +47,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 public class HadoopStorageManagerTest {
 
@@ -68,16 +77,56 @@ public class HadoopStorageManagerTest {
         appId, new RemoteStorageInfo(remoteStoragePath1, ImmutableMap.of("k1", "v1", "k2", "v2")));
     Map<String, HadoopStorage> appStorageMap = hadoopStorageManager.getAppIdToStorages();
 
+    ShuffleHandlerFactory shuffleHandlerFactory = mock(ShuffleHandlerFactory.class);
+    ShuffleDeleteHandler deleteHandler = mock(ShuffleDeleteHandler.class);
+    when(shuffleHandlerFactory.createShuffleDeleteHandler(any())).thenReturn(deleteHandler);
+    when(deleteHandler.delete(any(), any(), any())).thenReturn(true);
+
     // case1
-    assertEquals(1, appStorageMap.size());
-    ShufflePurgeEvent shufflePurgeEvent = new ShufflePurgeEvent(appId, "", Arrays.asList(1));
-    hadoopStorageManager.removeResources(shufflePurgeEvent);
+    try (MockedStatic<ShuffleHandlerFactory> mockedFactory =
+        Mockito.mockStatic(ShuffleHandlerFactory.class)) {
+      mockedFactory.when(ShuffleHandlerFactory::getInstance).thenReturn(shuffleHandlerFactory);
+
+      assertEquals(1, appStorageMap.size());
+      ShufflePurgeEvent shufflePurgeEvent = new ShufflePurgeEvent(appId, "", Arrays.asList(1));
+      hadoopStorageManager.removeResources(shufflePurgeEvent);
+      assertEquals(1, appStorageMap.size());
+
+      // case2
+      AppPurgeEvent appPurgeEvent = new AppPurgeEvent(appId, "");
+      hadoopStorageManager.removeResources(appPurgeEvent);
+      assertEquals(0, appStorageMap.size());
+    }
+  }
+
+  @Test
+  public void removeResourcesShouldKeepMetadataWhenDeleteFails() {
+    ShuffleServerConf conf = new ShuffleServerConf();
+    conf.setString(
+        ShuffleServerConf.RSS_STORAGE_TYPE.key(), StorageType.MEMORY_LOCALFILE_HDFS.name());
+    HadoopStorageManager hadoopStorageManager = new HadoopStorageManager(conf);
+    final String remoteStoragePath = "hdfs://path-delete-fails";
+    String appId = "removeResourcesShouldKeepMetadataWhenDeleteFails_appId";
+    hadoopStorageManager.registerRemoteStorage(appId, new RemoteStorageInfo(remoteStoragePath));
+    Map<String, HadoopStorage> appStorageMap = hadoopStorageManager.getAppIdToStorages();
     assertEquals(1, appStorageMap.size());
 
-    // case2
-    AppPurgeEvent appPurgeEvent = new AppPurgeEvent(appId, "");
-    hadoopStorageManager.removeResources(appPurgeEvent);
-    assertEquals(0, appStorageMap.size());
+    ShuffleHandlerFactory shuffleHandlerFactory = mock(ShuffleHandlerFactory.class);
+    ShuffleDeleteHandler deleteHandler = mock(ShuffleDeleteHandler.class);
+    when(shuffleHandlerFactory.createShuffleDeleteHandler(any())).thenReturn(deleteHandler);
+    when(deleteHandler.delete(any(), any(), any())).thenReturn(false);
+
+    try (MockedStatic<ShuffleHandlerFactory> mockedFactory =
+        Mockito.mockStatic(ShuffleHandlerFactory.class)) {
+      mockedFactory.when(ShuffleHandlerFactory::getInstance).thenReturn(shuffleHandlerFactory);
+
+      assertThrows(
+          RssException.class,
+          () -> hadoopStorageManager.removeResources(new AppPurgeEvent(appId, "")));
+    }
+
+    assertEquals(1, appStorageMap.size());
+    assertTrue(appStorageMap.containsKey(appId));
   }
 
   @Test

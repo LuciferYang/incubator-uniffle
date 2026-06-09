@@ -25,13 +25,24 @@ public class RssStartSortMergeRequest {
   private int shuffleId;
   private int partitionId;
   private Roaring64NavigableMap expectedBlockIds;
+  private Integer stageAttemptNumber;
 
   public RssStartSortMergeRequest(
       String appId, int shuffleId, int partitionId, Roaring64NavigableMap expectedBlockIds) {
+    this(appId, shuffleId, partitionId, expectedBlockIds, null);
+  }
+
+  public RssStartSortMergeRequest(
+      String appId,
+      int shuffleId,
+      int partitionId,
+      Roaring64NavigableMap expectedBlockIds,
+      Integer stageAttemptNumber) {
     this.appId = appId;
     this.shuffleId = shuffleId;
     this.partitionId = partitionId;
     this.expectedBlockIds = expectedBlockIds;
+    this.stageAttemptNumber = stageAttemptNumber;
   }
 
   public String getAppId() {
@@ -48,5 +59,13 @@ public class RssStartSortMergeRequest {
 
   public Roaring64NavigableMap getExpectedTaskIds() {
     return expectedBlockIds;
+  }
+
+  public int getStageAttemptNumber() {
+    return stageAttemptNumber == null ? 0 : stageAttemptNumber;
+  }
+
+  public boolean hasStageAttemptNumber() {
+    return stageAttemptNumber != null;
   }
 }

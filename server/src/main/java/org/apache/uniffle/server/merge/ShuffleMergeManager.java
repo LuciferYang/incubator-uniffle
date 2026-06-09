@@ -220,16 +220,27 @@ public class ShuffleMergeManager {
     }
   }
 
-  public void startSortMerge(
+  public StatusCode startSortMerge(
       String appId, int shuffleId, int partitionId, Roaring64NavigableMap expectedBlockIdMap)
+      throws IOException {
+    return startSortMerge(appId, shuffleId, partitionId, expectedBlockIdMap, null);
+  }
+
+  public StatusCode startSortMerge(
+      String appId,
+      int shuffleId,
+      int partitionId,
+      Roaring64NavigableMap expectedBlockIdMap,
+      Integer stageAttemptNumber)
       throws IOException {
     Map<Integer, Shuffle> shuffleMap = this.shuffles.get(appId);
     if (shuffleMap != null) {
       Shuffle shuffle = shuffleMap.get(shuffleId);
       if (shuffle != null) {
-        shuffle.startSortMerge(partitionId, expectedBlockIdMap);
+        return shuffle.startSortMerge(partitionId, expectedBlockIdMap, stageAttemptNumber);
       }
     }
+    return StatusCode.NO_REGISTER;
   }
 
   public void processEvent(MergeEvent event) {
@@ -243,6 +254,13 @@ public class ShuffleMergeManager {
       partition = this.getPartition(event.getAppId(), event.getShuffleId(), event.getPartitionId());
       if (partition == null) {
         LOG.info("Can not find partition for event: {}", event);
+        return;
+      }
+      Integer eventStageAttemptNumber =
+          event.hasStageAttemptNumber() ? event.getStageAttemptNumber() : null;
+      if (!partition.isCurrentStageAttempt(eventStageAttemptNumber)) {
+        LOG.warn("Ignore stale merge event: {}", event);
+        success = true;
         return;
       }
 
@@ -280,12 +298,19 @@ public class ShuffleMergeManager {
       SerOutputStream output = partition.createSerOutputStream(totalBytes);
 
       // 5 merge segments to output
-      partition.merge(segments, output, reader);
+      partition.merge(
+          segments,
+          output,
+          reader,
+          eventStageAttemptNumber);
       success = true;
     } catch (Throwable e) {
       LOG.error("Merge failed, caused by ", e);
     } finally {
-      if (!success && partition != null) {
+      if (!success
+          && partition != null
+          && partition.isCurrentStageAttempt(
+              event.hasStageAttemptNumber() ? event.getStageAttemptNumber() : null)) {
         partition.setState(INTERNAL_ERROR);
       }
       cachedBlocks.values().forEach(byteBuf -> byteBuf.release());

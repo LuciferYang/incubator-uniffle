@@ -29,12 +29,15 @@ import org.roaringbitmap.longlong.Roaring64NavigableMap;
 
 import org.apache.uniffle.client.PartitionDataReplicaRequirementTracking;
 import org.apache.uniffle.client.api.ShuffleManagerClient;
+import org.apache.uniffle.client.api.ShuffleResult;
 import org.apache.uniffle.client.impl.ShuffleWriteClientImpl;
 import org.apache.uniffle.client.request.RssGetShuffleResultForMultiPartRequest;
 import org.apache.uniffle.client.request.RssGetShuffleResultRequest;
 import org.apache.uniffle.client.request.RssReportShuffleResultRequest;
+import org.apache.uniffle.client.response.RssReportShuffleResultResponse;
 import org.apache.uniffle.common.ShuffleServerInfo;
 import org.apache.uniffle.common.exception.RssException;
+import org.apache.uniffle.common.rpc.StatusCode;
 import org.apache.uniffle.common.util.BlockIdLayout;
 
 /**
@@ -61,6 +64,68 @@ public class BlockIdSelfManagedShuffleWriteClient extends ShuffleWriteClientImpl
       int shuffleId,
       long taskAttemptId,
       int bitmapNum) {
+    reportShuffleResult(
+        serverToPartitionToBlockIds, appId, shuffleId, taskAttemptId, bitmapNum, (Integer) null);
+  }
+
+  @Override
+  public void reportShuffleResult(
+      Map<ShuffleServerInfo, Map<Integer, Set<Long>>> serverToPartitionToBlockIds,
+      String appId,
+      int shuffleId,
+      long taskAttemptId,
+      int bitmapNum,
+      int stageAttemptNumber) {
+    reportShuffleResultToManager(
+        serverToPartitionToBlockIds,
+        appId,
+        shuffleId,
+        taskAttemptId,
+        bitmapNum,
+        Integer.valueOf(stageAttemptNumber));
+  }
+
+  private void reportShuffleResult(
+      Map<ShuffleServerInfo, Map<Integer, Set<Long>>> serverToPartitionToBlockIds,
+      String appId,
+      int shuffleId,
+      long taskAttemptId,
+      int bitmapNum,
+      Integer stageAttemptNumber) {
+    reportShuffleResultToManager(
+        serverToPartitionToBlockIds,
+        appId,
+        shuffleId,
+        taskAttemptId,
+        bitmapNum,
+        stageAttemptNumber);
+  }
+
+  private void reportShuffleResultToManager(
+      Map<ShuffleServerInfo, Map<Integer, Set<Long>>> serverToPartitionToBlockIds,
+      String appId,
+      int shuffleId,
+      long taskAttemptId,
+      int bitmapNum,
+      Integer stageAttemptNumber) {
+    reportShuffleResultToManager(
+        serverToPartitionToBlockIds,
+        appId,
+        shuffleId,
+        taskAttemptId,
+        bitmapNum,
+        stageAttemptNumber,
+        null);
+  }
+
+  private void reportShuffleResultToManager(
+      Map<ShuffleServerInfo, Map<Integer, Set<Long>>> serverToPartitionToBlockIds,
+      String appId,
+      int shuffleId,
+      long taskAttemptId,
+      int bitmapNum,
+      Integer stageAttemptNumber,
+      Map<ShuffleServerInfo, Map<Integer, Long>> serverToPartitionToRecordNumbers) {
     Map<Integer, List<Long>> partitionToBlockIds = new HashMap<>();
     for (Map<Integer, Set<Long>> k : serverToPartitionToBlockIds.values()) {
       for (Map.Entry<Integer, Set<Long>> entry : k.entrySet()) {
@@ -71,10 +136,56 @@ public class BlockIdSelfManagedShuffleWriteClient extends ShuffleWriteClientImpl
       }
     }
 
+    Map<Integer, Long> partitionToRecordNumbers =
+        aggregatePartitionToRecordNumbers(serverToPartitionToRecordNumbers);
     RssReportShuffleResultRequest request =
-        new RssReportShuffleResultRequest(
-            appId, shuffleId, taskAttemptId, partitionToBlockIds, bitmapNum);
-    managerClientSupplier.get().reportShuffleResult(request);
+        stageAttemptNumber == null
+            ? new RssReportShuffleResultRequest(
+                appId,
+                shuffleId,
+                taskAttemptId,
+                partitionToBlockIds,
+                bitmapNum,
+                partitionToRecordNumbers)
+            : new RssReportShuffleResultRequest(
+                appId,
+                shuffleId,
+                taskAttemptId,
+                partitionToBlockIds,
+                bitmapNum,
+                stageAttemptNumber,
+                partitionToRecordNumbers);
+    RssReportShuffleResultResponse response = managerClientSupplier.get().reportShuffleResult(request);
+    if (response == null) {
+      throw new RssException("Report shuffle result to manager returned empty response");
+    }
+    if (response.getStatusCode() != StatusCode.SUCCESS) {
+      throw new RssException(
+          "Report shuffle result to manager failed with status: " + response.getStatusCode());
+    }
+    if (stageAttemptNumber != null
+        && (!response.hasStageAttemptAccepted() || !response.isStageAttemptAccepted())) {
+      throw new RssException(
+          "Report shuffle result to manager was rejected for stale stageAttemptNumber: "
+              + stageAttemptNumber);
+    }
+  }
+
+  private Map<Integer, Long> aggregatePartitionToRecordNumbers(
+      Map<ShuffleServerInfo, Map<Integer, Long>> serverToPartitionToRecordNumbers) {
+    if (serverToPartitionToRecordNumbers == null) {
+      return null;
+    }
+    Map<Integer, Long> partitionToRecordNumbers = new HashMap<>();
+    for (Map<Integer, Long> recordNumbers : serverToPartitionToRecordNumbers.values()) {
+      if (recordNumbers == null) {
+        continue;
+      }
+      for (Map.Entry<Integer, Long> entry : recordNumbers.entrySet()) {
+        partitionToRecordNumbers.merge(entry.getKey(), entry.getValue(), Math::max);
+      }
+    }
+    return partitionToRecordNumbers;
   }
 
   @Override
@@ -86,20 +197,115 @@ public class BlockIdSelfManagedShuffleWriteClient extends ShuffleWriteClientImpl
       int bitmapNum,
       Set<ShuffleServerInfo> reportFailureServers,
       boolean enableWriteFailureRetry) {
-    Map<Integer, List<Long>> partitionToBlockIds = new HashMap<>();
-    for (Map<Integer, Set<Long>> k : serverToPartitionToBlockIds.values()) {
-      for (Map.Entry<Integer, Set<Long>> entry : k.entrySet()) {
-        int partitionId = entry.getKey();
-        partitionToBlockIds
-            .computeIfAbsent(partitionId, x -> new ArrayList<>())
-            .addAll(entry.getValue());
-      }
-    }
+    reportShuffleResult(
+        serverToPartitionToBlockIds,
+        appId,
+        shuffleId,
+        taskAttemptId,
+        bitmapNum,
+        (Integer) null,
+        reportFailureServers,
+        enableWriteFailureRetry);
+  }
 
-    RssReportShuffleResultRequest request =
-        new RssReportShuffleResultRequest(
-            appId, shuffleId, taskAttemptId, partitionToBlockIds, bitmapNum);
-    managerClientSupplier.get().reportShuffleResult(request);
+  private void reportShuffleResult(
+      Map<ShuffleServerInfo, Map<Integer, Set<Long>>> serverToPartitionToBlockIds,
+      String appId,
+      int shuffleId,
+      long taskAttemptId,
+      int bitmapNum,
+      Integer stageAttemptNumber,
+      Set<ShuffleServerInfo> reportFailureServers,
+      boolean enableWriteFailureRetry) {
+    reportShuffleResultToManager(
+        serverToPartitionToBlockIds,
+        appId,
+        shuffleId,
+        taskAttemptId,
+        bitmapNum,
+        stageAttemptNumber);
+  }
+
+  @Override
+  public void reportShuffleResult(
+      Map<ShuffleServerInfo, Map<Integer, Set<Long>>> serverToPartitionToBlockIds,
+      String appId,
+      int shuffleId,
+      long taskAttemptId,
+      int bitmapNum,
+      int stageAttemptNumber,
+      Set<ShuffleServerInfo> reportFailureServers,
+      boolean enableWriteFailureRetry) {
+    reportShuffleResultToManager(
+        serverToPartitionToBlockIds,
+        appId,
+        shuffleId,
+        taskAttemptId,
+        bitmapNum,
+        Integer.valueOf(stageAttemptNumber));
+  }
+
+  @Override
+  public void reportShuffleResult(
+      Map<ShuffleServerInfo, Map<Integer, Set<Long>>> serverToPartitionToBlockIds,
+      String appId,
+      int shuffleId,
+      long taskAttemptId,
+      int bitmapNum,
+      Set<ShuffleServerInfo> reportFailureServers,
+      boolean enableWriteFailureRetry,
+      Map<ShuffleServerInfo, Map<Integer, Long>> serverToPartitionToRecordNumbers) {
+    reportShuffleResult(
+        serverToPartitionToBlockIds,
+        appId,
+        shuffleId,
+        taskAttemptId,
+        bitmapNum,
+        (Integer) null,
+        reportFailureServers,
+        enableWriteFailureRetry,
+        serverToPartitionToRecordNumbers);
+  }
+
+  private void reportShuffleResult(
+      Map<ShuffleServerInfo, Map<Integer, Set<Long>>> serverToPartitionToBlockIds,
+      String appId,
+      int shuffleId,
+      long taskAttemptId,
+      int bitmapNum,
+      Integer stageAttemptNumber,
+      Set<ShuffleServerInfo> reportFailureServers,
+      boolean enableWriteFailureRetry,
+      Map<ShuffleServerInfo, Map<Integer, Long>> serverToPartitionToRecordNumbers) {
+    reportShuffleResultToManager(
+        serverToPartitionToBlockIds,
+        appId,
+        shuffleId,
+        taskAttemptId,
+        bitmapNum,
+        stageAttemptNumber,
+        serverToPartitionToRecordNumbers);
+  }
+
+  @Override
+  public void reportShuffleResult(
+      Map<ShuffleServerInfo, Map<Integer, Set<Long>>> serverToPartitionToBlockIds,
+      String appId,
+      int shuffleId,
+      long taskAttemptId,
+      int bitmapNum,
+      int stageAttemptNumber,
+      Set<ShuffleServerInfo> reportFailureServers,
+      boolean enableWriteFailureRetry,
+      Map<ShuffleServerInfo, Map<Integer, Long>> serverToPartitionToRecordNumbers) {
+    reportShuffleResultToManager(
+        serverToPartitionToBlockIds,
+        appId,
+        shuffleId,
+        taskAttemptId,
+        bitmapNum,
+        Integer.valueOf(stageAttemptNumber),
+        serverToPartitionToRecordNumbers);
   }
 
   @Override
@@ -128,5 +334,24 @@ public class BlockIdSelfManagedShuffleWriteClient extends ShuffleWriteClientImpl
         new RssGetShuffleResultForMultiPartRequest(
             appId, shuffleId, partitionIds, BlockIdLayout.DEFAULT);
     return managerClientSupplier.get().getShuffleResultForMultiPart(request).getBlockIdBitmap();
+  }
+
+  @Override
+  public ShuffleResult getShuffleResultForMultiPartV2(
+      String clientType,
+      Map<ShuffleServerInfo, Set<Integer>> serverToPartitions,
+      String appId,
+      int shuffleId,
+      Set<Integer> failedPartitions,
+      PartitionDataReplicaRequirementTracking replicaRequirementTracking) {
+    return new ShuffleResult(
+        getShuffleResultForMultiPart(
+            clientType,
+            serverToPartitions,
+            appId,
+            shuffleId,
+            failedPartitions,
+            replicaRequirementTracking),
+        null);
   }
 }

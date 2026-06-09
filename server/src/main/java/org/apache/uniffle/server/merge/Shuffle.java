@@ -26,6 +26,7 @@ import com.google.common.annotations.VisibleForTesting;
 import org.roaringbitmap.longlong.Roaring64NavigableMap;
 
 import org.apache.uniffle.common.config.RssConf;
+import org.apache.uniffle.common.rpc.StatusCode;
 import org.apache.uniffle.common.util.JavaUtils;
 import org.apache.uniffle.server.ShuffleServer;
 
@@ -68,7 +69,13 @@ public class Shuffle<K, V> {
     this.classLoader = classLoader;
   }
 
-  public void startSortMerge(int partitionId, Roaring64NavigableMap expectedBlockIdMap)
+  public StatusCode startSortMerge(int partitionId, Roaring64NavigableMap expectedBlockIdMap)
+      throws IOException {
+    return startSortMerge(partitionId, expectedBlockIdMap, null);
+  }
+
+  public StatusCode startSortMerge(
+      int partitionId, Roaring64NavigableMap expectedBlockIdMap, Integer stageAttemptNumber)
       throws IOException {
     AtomicReference<IOException> exception = new AtomicReference<>();
     Partition<K, V> partition =
@@ -86,7 +93,7 @@ public class Shuffle<K, V> {
       throw exception.get();
     }
     assert partition != null;
-    partition.startSortMerge(expectedBlockIdMap);
+    return partition.startSortMerge(expectedBlockIdMap, stageAttemptNumber);
   }
 
   void cleanup() {

@@ -27,6 +27,7 @@ import java.util.Set;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -224,7 +225,12 @@ public class ShuffleTaskManager {
                 ShuffleServerMetrics.summaryTotalRemoveResourceTime.observe(usedTime);
               }
               if (event instanceof ShufflePurgeEvent) {
-                removeResourcesByShuffleIds(event.getAppId(), event.getShuffleIds());
+                ShufflePurgeEvent shufflePurgeEvent = (ShufflePurgeEvent) event;
+                removeResourcesByShuffleIds(
+                    event.getAppId(),
+                    event.getShuffleIds(),
+                    event.isRenameAndDelete(),
+                    shufflePurgeEvent.getStageAttemptNumber());
                 double usedTime =
                     (System.currentTimeMillis() - startTime) / Constants.MILLION_SECONDS_PER_SECOND;
                 ShuffleServerMetrics.summaryTotalRemoveResourceByShuffleIdsTime.observe(usedTime);
@@ -371,6 +377,48 @@ public class ShuffleTaskManager {
     return shuffleBufferManager.cacheShuffleData(appId, shuffleId, isPreAllocated, spd);
   }
 
+  public StatusCode cacheShuffleData(
+      String appId,
+      int shuffleId,
+      int stageAttemptNumber,
+      boolean isPreAllocated,
+      int partitionId,
+      ShufflePartitionedData spd) {
+    Lock readLock = getAppReadLock(appId);
+    readLock.lock();
+    try {
+      refreshAppId(appId);
+      ShuffleTaskInfo taskInfo = getShuffleTaskInfo(appId);
+      if (taskInfo == null) {
+        return StatusCode.APP_NOT_FOUND;
+      }
+      synchronized (taskInfo.getStageAttemptLock(shuffleId)) {
+        if (!taskInfo.acceptStageAttempt(shuffleId, true, stageAttemptNumber)) {
+          return StatusCode.STAGE_RETRY_IGNORE;
+        }
+        int latestStageAttemptNumber = taskInfo.getLatestStageAttemptNumber(shuffleId);
+        if (stageAttemptNumber < latestStageAttemptNumber) {
+          return StatusCode.STAGE_RETRY_IGNORE;
+        }
+        if (taskInfo.isNewerStageAttempt(shuffleId, stageAttemptNumber)) {
+          taskInfo.removeStageAttemptMutableResources(shuffleId);
+          ShuffleBlockIdManager manager = taskInfo.getShuffleBlockIdManager();
+          if (manager != null) {
+            manager.removeBlockIdByShuffleId(appId, Arrays.asList(shuffleId));
+          }
+        }
+        taskInfo.refreshLatestStageAttemptNumber(shuffleId, stageAttemptNumber);
+        StatusCode statusCode = cacheShuffleData(appId, shuffleId, isPreAllocated, spd);
+        if (statusCode == StatusCode.SUCCESS) {
+          updateCachedBlockIds(appId, shuffleId, partitionId, spd);
+        }
+        return statusCode;
+      }
+    } finally {
+      readLock.unlock();
+    }
+  }
+
   public PreAllocatedBufferInfo getAndRemovePreAllocatedBuffer(long requireBufferId) {
     return requireBufferIds.remove(requireBufferId);
   }
@@ -388,12 +436,59 @@ public class ShuffleTaskManager {
   }
 
   public StatusCode commitShuffle(String appId, int shuffleId) throws Exception {
+    return commitShuffle(appId, shuffleId, false, 0);
+  }
+
+  public StatusCode commitShuffle(
+      String appId, int shuffleId, boolean hasStageAttemptNumber, int stageAttemptNumber)
+      throws Exception {
+    Lock readLock = getAppReadLock(appId);
+    readLock.lock();
+    try {
+      refreshAppId(appId);
+      ShuffleTaskInfo shuffleTaskInfo =
+          shuffleTaskInfos.computeIfAbsent(appId, x -> new ShuffleTaskInfo(appId));
+      synchronized (shuffleTaskInfo.getStageAttemptLock(shuffleId)) {
+        if (!shuffleTaskInfo.acceptShuffleResult(
+            shuffleId, hasStageAttemptNumber, stageAttemptNumber)) {
+          LOG.warn(
+              "Ignore stale finish shuffle for appId[{}], shuffleId[{}], stageAttemptNumber[{}], hasStageAttemptNumber[{}], latestStageAttemptNumber[{}]",
+              appId,
+              shuffleId,
+              stageAttemptNumber,
+              hasStageAttemptNumber,
+              shuffleTaskInfo.getLatestStageAttemptNumber(shuffleId));
+          return StatusCode.STAGE_RETRY_IGNORE;
+        }
+        if (hasStageAttemptNumber
+            && shuffleTaskInfo.isNewerStageAttempt(shuffleId, stageAttemptNumber)) {
+          shuffleTaskInfo.removeStageAttemptMutableResources(shuffleId);
+          ShuffleBlockIdManager manager = shuffleTaskInfo.getShuffleBlockIdManager();
+          if (manager != null) {
+            manager.removeBlockIdByShuffleId(appId, Arrays.asList(shuffleId));
+          }
+        }
+        if (hasStageAttemptNumber) {
+          shuffleTaskInfo.refreshLatestStageAttemptNumber(shuffleId, stageAttemptNumber);
+        }
+      }
+      return commitShuffleInternal(
+          appId, shuffleId, shuffleTaskInfo, hasStageAttemptNumber, stageAttemptNumber);
+    } finally {
+      readLock.unlock();
+    }
+  }
+
+  private StatusCode commitShuffleInternal(
+      String appId,
+      int shuffleId,
+      ShuffleTaskInfo shuffleTaskInfo,
+      boolean hasStageAttemptNumber,
+      int stageAttemptNumber)
+      throws Exception {
     long start = System.currentTimeMillis();
-    refreshAppId(appId);
     long cachedBlockCount = getCachedBlockCount(appId, shuffleId);
 
-    ShuffleTaskInfo shuffleTaskInfo =
-        shuffleTaskInfos.computeIfAbsent(appId, x -> new ShuffleTaskInfo(appId));
     Object lock = shuffleTaskInfo.getCommitLocks().computeIfAbsent(shuffleId, x -> new Object());
     synchronized (lock) {
       long commitTimeout = conf.get(ShuffleServerConf.SERVER_COMMIT_TIMEOUT);
@@ -401,11 +496,21 @@ public class ShuffleTaskManager {
         throw new RssException("Shuffle data commit timeout for " + commitTimeout + " ms");
       }
       long expectedCommitted = cachedBlockCount;
-      shuffleBufferManager.commitShuffleTask(appId, shuffleId);
+      synchronized (shuffleTaskInfo.getStageAttemptLock(shuffleId)) {
+        if (isCommitStageAttemptRejected(
+            shuffleTaskInfo, shuffleId, hasStageAttemptNumber, stageAttemptNumber)) {
+          return StatusCode.STAGE_RETRY_IGNORE;
+        }
+        shuffleBufferManager.commitShuffleTask(appId, shuffleId);
+      }
       long checkInterval = 1000L;
       long remain = expectedCommitted;
       while (remain > 0) {
         Thread.sleep(checkInterval);
+        if (isCommitStageAttemptRejected(
+            shuffleTaskInfo, shuffleId, hasStageAttemptNumber, stageAttemptNumber)) {
+          return StatusCode.STAGE_RETRY_IGNORE;
+        }
         if (System.currentTimeMillis() - start > commitTimeout) {
           throw new RssException("Shuffle data commit timeout for " + commitTimeout + " ms");
         }
@@ -433,7 +538,24 @@ public class ShuffleTaskManager {
               + (System.currentTimeMillis() - start)
               + " ms to check");
     }
+    if (isCommitStageAttemptRejected(
+        shuffleTaskInfo, shuffleId, hasStageAttemptNumber, stageAttemptNumber)) {
+      return StatusCode.STAGE_RETRY_IGNORE;
+    }
     return StatusCode.SUCCESS;
+  }
+
+  private boolean isCommitStageAttemptRejected(
+      ShuffleTaskInfo shuffleTaskInfo,
+      int shuffleId,
+      boolean hasStageAttemptNumber,
+      int stageAttemptNumber) {
+    if (!hasStageAttemptNumber) {
+      return false;
+    }
+    synchronized (shuffleTaskInfo.getStageAttemptLock(shuffleId)) {
+      return !shuffleTaskInfo.acceptShuffleResult(shuffleId, true, stageAttemptNumber);
+    }
   }
 
   /**
@@ -447,17 +569,92 @@ public class ShuffleTaskManager {
    */
   public int addFinishedBlockIds(
       String appId, Integer shuffleId, Map<Integer, long[]> partitionToBlockIds, int bitmapNum) {
-    refreshAppId(appId);
-    ShuffleTaskInfo taskInfo = getShuffleTaskInfo(appId);
-    if (taskInfo == null) {
-      throw new InvalidRequestException(
-          "ShuffleTaskInfo is not found that should not happen for appId: " + appId);
+    return addFinishedBlockIdsWithStatus(appId, shuffleId, partitionToBlockIds, bitmapNum, false, 0)
+        .getUpdatedBlockCount();
+  }
+
+  public int addFinishedBlockIds(
+      String appId,
+      Integer shuffleId,
+      Map<Integer, long[]> partitionToBlockIds,
+      int bitmapNum,
+      boolean hasStageAttemptNumber,
+      int stageAttemptNumber) {
+    return addFinishedBlockIdsWithStatus(
+            appId, shuffleId, partitionToBlockIds, bitmapNum, hasStageAttemptNumber, stageAttemptNumber)
+        .getUpdatedBlockCount();
+  }
+
+  public AddFinishedBlockIdsResult addFinishedBlockIdsWithStatus(
+      String appId,
+      Integer shuffleId,
+      Map<Integer, long[]> partitionToBlockIds,
+      int bitmapNum,
+      boolean hasStageAttemptNumber,
+      int stageAttemptNumber) {
+    Lock readLock = getAppReadLock(appId);
+    readLock.lock();
+    try {
+      refreshAppId(appId);
+      ShuffleTaskInfo taskInfo = getShuffleTaskInfo(appId);
+      if (taskInfo == null) {
+        throw new InvalidRequestException(
+            "ShuffleTaskInfo is not found that should not happen for appId: " + appId);
+      }
+      synchronized (taskInfo.getStageAttemptLock(shuffleId)) {
+        if (!taskInfo.acceptShuffleResult(shuffleId, hasStageAttemptNumber, stageAttemptNumber)) {
+          LOG.warn(
+              "Ignore stale shuffle result for appId[{}], shuffleId[{}], stageAttemptNumber[{}], hasStageAttemptNumber[{}], latestStageAttemptNumber[{}]",
+              appId,
+              shuffleId,
+              stageAttemptNumber,
+              hasStageAttemptNumber,
+              taskInfo.getLatestStageAttemptNumber(shuffleId));
+          return new AddFinishedBlockIdsResult(StatusCode.STAGE_RETRY_IGNORE, 0);
+        }
+        ShuffleBlockIdManager manager = taskInfo.getShuffleBlockIdManager();
+        if (manager == null) {
+          throw new RssException("appId[" + appId + "] is expired!");
+        }
+        if (hasStageAttemptNumber && taskInfo.isNewerStageAttempt(shuffleId, stageAttemptNumber)) {
+          manager.removeBlockIdByShuffleId(appId, Arrays.asList(shuffleId));
+          taskInfo.removeStageAttemptMutableResources(shuffleId);
+        } else if (hasStageAttemptNumber
+            && stageAttemptNumber > taskInfo.getLatestShuffleResultStageAttemptNumber(shuffleId)) {
+          manager.removeBlockIdByShuffleId(appId, Arrays.asList(shuffleId));
+          taskInfo.removeShuffleResultResources(shuffleId);
+        }
+        if (hasStageAttemptNumber) {
+          taskInfo.refreshLatestShuffleResultStageAttemptNumber(shuffleId, stageAttemptNumber);
+        }
+        int updatedBlockCount =
+            manager.addFinishedBlockIds(taskInfo, appId, shuffleId, partitionToBlockIds, bitmapNum);
+        if (hasStageAttemptNumber) {
+          taskInfo.refreshLatestStageAttemptNumber(shuffleId, stageAttemptNumber);
+        }
+        return new AddFinishedBlockIdsResult(StatusCode.SUCCESS, updatedBlockCount);
+      }
+    } finally {
+      readLock.unlock();
     }
-    ShuffleBlockIdManager manager = taskInfo.getShuffleBlockIdManager();
-    if (manager == null) {
-      throw new RssException("appId[" + appId + "] is expired!");
+  }
+
+  public static class AddFinishedBlockIdsResult {
+    private final StatusCode statusCode;
+    private final int updatedBlockCount;
+
+    public AddFinishedBlockIdsResult(StatusCode statusCode, int updatedBlockCount) {
+      this.statusCode = statusCode;
+      this.updatedBlockCount = updatedBlockCount;
     }
-    return manager.addFinishedBlockIds(taskInfo, appId, shuffleId, partitionToBlockIds, bitmapNum);
+
+    public StatusCode getStatusCode() {
+      return statusCode;
+    }
+
+    public int getUpdatedBlockCount() {
+      return updatedBlockCount;
+    }
   }
 
   public int updateAndGetCommitCount(String appId, int shuffleId) {
@@ -466,6 +663,49 @@ public class ShuffleTaskManager {
     AtomicInteger commitNum =
         shuffleTaskInfo.getCommitCounts().computeIfAbsent(shuffleId, x -> new AtomicInteger(0));
     return commitNum.incrementAndGet();
+  }
+
+  public int updateAndGetCommitCount(
+      String appId, int shuffleId, boolean hasStageAttemptNumber, int stageAttemptNumber) {
+    Lock readLock = getAppReadLock(appId);
+    readLock.lock();
+    try {
+      refreshAppId(appId);
+      ShuffleTaskInfo shuffleTaskInfo = getShuffleTaskInfo(appId);
+      if (shuffleTaskInfo == null) {
+        throw new InvalidRequestException(
+            "ShuffleTaskInfo is not found that should not happen for appId: " + appId);
+      }
+      synchronized (shuffleTaskInfo.getStageAttemptLock(shuffleId)) {
+        if (!shuffleTaskInfo.acceptShuffleResult(
+            shuffleId, hasStageAttemptNumber, stageAttemptNumber)) {
+          LOG.warn(
+              "Ignore stale commit for appId[{}], shuffleId[{}], stageAttemptNumber[{}], hasStageAttemptNumber[{}], latestStageAttemptNumber[{}]",
+              appId,
+              shuffleId,
+              stageAttemptNumber,
+              hasStageAttemptNumber,
+              shuffleTaskInfo.getLatestStageAttemptNumber(shuffleId));
+          return -1;
+        }
+        if (hasStageAttemptNumber
+            && shuffleTaskInfo.isNewerStageAttempt(shuffleId, stageAttemptNumber)) {
+          shuffleTaskInfo.removeStageAttemptMutableResources(shuffleId);
+          ShuffleBlockIdManager manager = shuffleTaskInfo.getShuffleBlockIdManager();
+          if (manager != null) {
+            manager.removeBlockIdByShuffleId(appId, Arrays.asList(shuffleId));
+          }
+        }
+        if (hasStageAttemptNumber) {
+          shuffleTaskInfo.refreshLatestStageAttemptNumber(shuffleId, stageAttemptNumber);
+        }
+        AtomicInteger commitNum =
+            shuffleTaskInfo.getCommitCounts().computeIfAbsent(shuffleId, x -> new AtomicInteger(0));
+        return commitNum.incrementAndGet();
+      }
+    } finally {
+      readLock.unlock();
+    }
   }
 
   // Only for tests
@@ -784,59 +1024,144 @@ public class ShuffleTaskManager {
    * @param appId
    * @param shuffleIds
    */
-  public void removeResourcesByShuffleIds(String appId, List<Integer> shuffleIds) {
-    removeResourcesByShuffleIds(appId, shuffleIds, false);
+  public boolean removeResourcesByShuffleIds(String appId, List<Integer> shuffleIds) {
+    return removeResourcesByShuffleIds(appId, shuffleIds, false);
   }
 
-  public void removeResourcesByShuffleIds(
+  public boolean removeResourcesByShuffleIds(
       String appId, List<Integer> shuffleIds, boolean isRenameAndDelete) {
+    return removeResourcesByShuffleIds(appId, shuffleIds, isRenameAndDelete, null);
+  }
+
+  private boolean removeResourcesByShuffleIds(
+      String appId,
+      List<Integer> shuffleIds,
+      boolean isRenameAndDelete,
+      Integer stageAttemptNumber) {
+    return removeResourcesByShuffleIds(
+        appId, shuffleIds, isRenameAndDelete, stageAttemptNumber, false);
+  }
+
+  private boolean removeResourcesByShuffleIds(
+      String appId,
+      List<Integer> shuffleIds,
+      boolean isRenameAndDelete,
+      Integer stageAttemptNumber,
+      boolean preserveRegisteredBuffer) {
+    markStageAttemptCleanupFence(appId, shuffleIds, stageAttemptNumber);
     Lock writeLock = getAppWriteLock(appId);
     writeLock.lock();
     try {
       if (CollectionUtils.isEmpty(shuffleIds)) {
-        return;
+        return false;
       }
 
       LOG.info("Start remove resource for appId[{}], shuffleIds[{}]", appId, shuffleIds);
       final long start = System.currentTimeMillis();
       final ShuffleTaskInfo taskInfo = shuffleTaskInfos.get(appId);
+      List<Integer> purgeShuffleIds = shuffleIds;
       if (taskInfo != null) {
+        List<Integer> acceptedShuffleIds = Lists.newArrayList();
         for (Integer shuffleId : shuffleIds) {
-          taskInfo.getCachedBlockCount().remove(shuffleId);
-          taskInfo.getCommitCounts().remove(shuffleId);
-          taskInfo.getCommitLocks().remove(shuffleId);
+          if (stageAttemptNumber != null
+              && taskInfo.getLatestStageAttemptNumber(shuffleId) > stageAttemptNumber) {
+            taskInfo.markShuffleResultFenceOnly(shuffleId, stageAttemptNumber);
+            LOG.info(
+                "Skip removing shuffleId[{}] of appId[{}] because latestStageAttemptNumber[{}] is newer than purge stageAttemptNumber[{}].",
+                shuffleId,
+                appId,
+                taskInfo.getLatestStageAttemptNumber(shuffleId),
+                stageAttemptNumber);
+            continue;
+          }
+          acceptedShuffleIds.add(shuffleId);
+        }
+        if (acceptedShuffleIds.isEmpty()) {
+          return stageAttemptNumber != null;
         }
         ShuffleBlockIdManager manager = taskInfo.getShuffleBlockIdManager();
         if (manager == null) {
           throw new RssException("appId[" + appId + "] is expired!");
         }
-        manager.removeBlockIdByShuffleId(appId, shuffleIds);
+        purgeShuffleIds = acceptedShuffleIds;
       } else {
-        shuffleBlockIdManager.removeBlockIdByShuffleId(appId, shuffleIds);
+        purgeShuffleIds = shuffleIds;
       }
-      shuffleBufferManager.removeBufferByShuffleId(appId, shuffleIds);
-      shuffleFlushManager.removeResourcesOfShuffleId(appId, shuffleIds);
 
       String operationMsg =
-          String.format("removing storage data for appId:%s, shuffleIds:%s", appId, shuffleIds);
-      withTimeoutExecution(
-          () -> {
-            storageManager.removeResources(
-                new ShufflePurgeEvent(appId, getUserByAppId(appId), shuffleIds, isRenameAndDelete));
-            return null;
-          },
-          storageRemoveOperationTimeoutSec,
-          operationMsg);
+          String.format("removing storage data for appId:%s, shuffleIds:%s", appId, purgeShuffleIds);
+      List<Integer> storageShuffleIds = purgeShuffleIds;
+      ShufflePurgeEvent purgeEvent =
+          new ShufflePurgeEvent(
+              appId,
+              getUserByAppId(appId),
+              storageShuffleIds,
+              isRenameAndDelete,
+              stageAttemptNumber);
+      if (stageAttemptNumber == null) {
+        withTimeoutExecution(
+            () -> {
+              storageManager.removeResources(purgeEvent);
+              return null;
+            },
+            storageRemoveOperationTimeoutSec,
+            operationMsg);
+      } else {
+        if (taskInfo != null) {
+          for (Integer shuffleId : purgeShuffleIds) {
+            taskInfo.markShuffleResultFenceOnly(shuffleId, stageAttemptNumber);
+          }
+        }
+        storageManager.removeResources(purgeEvent);
+      }
+      if (taskInfo != null) {
+        for (Integer shuffleId : purgeShuffleIds) {
+          taskInfo.markShuffleResultCleaned(
+              shuffleId,
+              stageAttemptNumber == null
+                  ? taskInfo.getLatestStageAttemptNumber(shuffleId)
+                  : stageAttemptNumber);
+          taskInfo.removeShuffleResources(shuffleId);
+        }
+        ShuffleBlockIdManager manager = taskInfo.getShuffleBlockIdManager();
+        if (manager == null) {
+          throw new RssException("appId[" + appId + "] is expired!");
+        }
+        manager.removeBlockIdByShuffleId(appId, purgeShuffleIds);
+      } else {
+        shuffleBlockIdManager.removeBlockIdByShuffleId(appId, purgeShuffleIds);
+      }
+      if (!preserveRegisteredBuffer) {
+        shuffleBufferManager.removeBufferByShuffleId(appId, purgeShuffleIds);
+      }
+      shuffleFlushManager.removeResourcesOfShuffleId(appId, purgeShuffleIds);
       if (shuffleMergeManager != null) {
-        shuffleMergeManager.removeBuffer(appId, shuffleIds);
+        shuffleMergeManager.removeBuffer(appId, purgeShuffleIds);
       }
       LOG.info(
           "Finish remove resource for appId[{}], shuffleIds[{}], cost[{}]",
           appId,
           shuffleIds,
           System.currentTimeMillis() - start);
+      return true;
     } finally {
       writeLock.unlock();
+    }
+  }
+
+  private void markStageAttemptCleanupFence(
+      String appId, List<Integer> shuffleIds, Integer stageAttemptNumber) {
+    if (stageAttemptNumber == null || CollectionUtils.isEmpty(shuffleIds)) {
+      return;
+    }
+    ShuffleTaskInfo taskInfo = shuffleTaskInfos.get(appId);
+    if (taskInfo == null) {
+      return;
+    }
+    for (Integer shuffleId : shuffleIds) {
+      synchronized (taskInfo.getStageAttemptLock(shuffleId)) {
+        taskInfo.markShuffleResultFenceOnly(shuffleId, stageAttemptNumber);
+      }
     }
   }
 
@@ -865,7 +1190,7 @@ public class ShuffleTaskManager {
       }
       final long start = System.currentTimeMillis();
       removingApps.put(appId, start);
-      ShuffleTaskInfo shuffleTaskInfo = shuffleTaskInfos.remove(appId);
+      ShuffleTaskInfo shuffleTaskInfo = shuffleTaskInfos.get(appId);
       if (shuffleTaskInfo == null) {
         LOG.info("Resource for appId[" + appId + "] had been removed before.");
         return;
@@ -892,14 +1217,6 @@ public class ShuffleTaskManager {
       partitionInfoSummary.append("The app task info: ").append(shuffleTaskInfo);
       LOG.info("Removing app summary info: {}", partitionInfoSummary);
 
-      ShuffleBlockIdManager manager = shuffleTaskInfo.getShuffleBlockIdManager();
-      if (manager != null) {
-        manager.remove(appId);
-      }
-      shuffleBlockIdManager.remove(appId);
-      shuffleBufferManager.removeBuffer(appId);
-      shuffleFlushManager.removeResources(appId);
-
       String operationMsg = String.format("removing storage data for appId:%s", appId);
       withTimeoutExecution(
           () -> {
@@ -913,6 +1230,14 @@ public class ShuffleTaskManager {
           },
           storageRemoveOperationTimeoutSec,
           operationMsg);
+      shuffleTaskInfos.remove(appId);
+      ShuffleBlockIdManager manager = shuffleTaskInfo.getShuffleBlockIdManager();
+      if (manager != null) {
+        manager.remove(appId);
+      }
+      shuffleBlockIdManager.remove(appId);
+      shuffleBufferManager.removeBuffer(appId);
+      shuffleFlushManager.removeResources(appId);
       if (shuffleMergeManager != null) {
         shuffleMergeManager.removeBuffer(appId);
       }
@@ -933,24 +1258,27 @@ public class ShuffleTaskManager {
   }
 
   private void withTimeoutExecution(
-      Supplier supplier, long timeoutSec, String operationDetailedMsg) {
+      Supplier<Void> supplier, long timeoutSec, String operationDetailedMsg) {
+    ExecutorService executorService = Executors.newSingleThreadExecutor();
     CompletableFuture<Void> future =
-        CompletableFuture.supplyAsync(supplier, Executors.newSingleThreadExecutor());
-    CompletableFuture extended =
+        CompletableFuture.supplyAsync(supplier, executorService);
+    CompletableFuture<Void> extended =
         CompletableFutureExtension.orTimeout(future, timeoutSec, TimeUnit.SECONDS);
     try {
       extended.get();
     } catch (Exception e) {
       if (e instanceof ExecutionException) {
         if (e.getCause() instanceof TimeoutException) {
-          LOG.error(
-              "Errors on finishing operation of [{}] in the {}(sec). This should not happen!",
-              operationDetailedMsg,
-              timeoutSec);
-          return;
+          throw new RssException(
+              String.format(
+                  "Errors on finishing operation of [%s] in the %s(sec). This should not happen!",
+                  operationDetailedMsg, timeoutSec),
+              e);
         }
         throw new RssException(e);
       }
+    } finally {
+      executorService.shutdownNow();
     }
   }
 
@@ -1022,6 +1350,12 @@ public class ShuffleTaskManager {
         new ShufflePurgeEvent(appId, getUserByAppId(appId), Arrays.asList(shuffleId)));
   }
 
+  public void removeShuffleDataAsync(String appId, int shuffleId, int stageAttemptNumber) {
+    expiredAppIdQueue.add(
+        new ShufflePurgeEvent(
+            appId, getUserByAppId(appId), Arrays.asList(shuffleId), false, stageAttemptNumber));
+  }
+
   public void removeShuffleDataAsync(String appId) {
     expiredAppIdQueue.add(new AppUnregisterPurgeEvent(appId, getUserByAppId(appId)));
   }
@@ -1029,6 +1363,16 @@ public class ShuffleTaskManager {
   @VisibleForTesting
   public void removeShuffleDataSync(String appId, int shuffleId) {
     removeResourcesByShuffleIds(appId, Arrays.asList(shuffleId));
+  }
+
+  public boolean removeShuffleDataSync(String appId, int shuffleId, int stageAttemptNumber) {
+    return removeResourcesByShuffleIds(appId, Arrays.asList(shuffleId), false, stageAttemptNumber);
+  }
+
+  public boolean removeShuffleDataSync(
+      String appId, int shuffleId, int stageAttemptNumber, boolean preserveRegisteredBuffer) {
+    return removeResourcesByShuffleIds(
+        appId, Arrays.asList(shuffleId), false, stageAttemptNumber, preserveRegisteredBuffer);
   }
 
   public void removeShuffleDataSyncRenameAndDelete(String appId, int shuffleId) {
@@ -1042,6 +1386,18 @@ public class ShuffleTaskManager {
   @VisibleForTesting
   public ShuffleTaskInfo getShuffleTaskInfo(String appId) {
     return shuffleTaskInfos.get(appId);
+  }
+
+  public int getLatestStageAttemptNumber(String appId, int shuffleId) {
+    ShuffleTaskInfo taskInfo = shuffleTaskInfos.get(appId);
+    return taskInfo == null ? 0 : taskInfo.getLatestStageAttemptNumber(shuffleId);
+  }
+
+  public void refreshLatestStageAttemptNumber(String appId, int shuffleId, int stageAttemptNumber) {
+    ShuffleTaskInfo taskInfo = shuffleTaskInfos.get(appId);
+    if (taskInfo != null) {
+      taskInfo.refreshLatestStageAttemptNumber(shuffleId, stageAttemptNumber);
+    }
   }
 
   private void triggerFlush() {

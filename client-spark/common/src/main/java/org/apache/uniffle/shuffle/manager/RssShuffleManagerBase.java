@@ -478,6 +478,33 @@ public abstract class RssShuffleManagerBase implements RssShuffleManagerInterfac
     return true;
   }
 
+  @Override
+  public void unregisterShuffleDataForWriteFailure(int shuffleId) {
+    unregisterShuffleDataForWriteFailure(shuffleId, 0);
+  }
+
+  @Override
+  public void unregisterShuffleDataForWriteFailure(int shuffleId, int stageAttemptNumber) {
+    if (shuffleWriteClient == null) {
+      throw new RssException(
+          "Cannot unregister shuffle data for write failure because ShuffleWriteClient is null, appId="
+              + getAppId()
+              + ", shuffleId="
+              + shuffleId);
+    }
+    shuffleWriteClient.unregisterShuffle(getAppId(), shuffleId, stageAttemptNumber);
+  }
+
+  @Override
+  public void clearShuffleDataForWriteFailure(int shuffleId) {
+    if (blockIdManager != null) {
+      blockIdManager.remove(shuffleId);
+    }
+    if (readShuffleHandleCache != null) {
+      readShuffleHandleCache.remove(shuffleId);
+    }
+  }
+
   /**
    * Derives block id layout config from maximum number of allowed partitions. Computes the number
    * of required bits for partition id and task attempt id and reserves remaining bits for sequence
@@ -1638,5 +1665,14 @@ public abstract class RssShuffleManagerBase implements RssShuffleManagerInterfac
       throw new RssException("Shuffle handle id " + shuffleId + " not found");
     }
     return handle;
+  }
+
+  /**
+   * The read shuffle handle cache is keyed only by shuffle id. Write-failure stage retry can
+   * reassign shuffle servers for the same shuffle id, including on executors that cannot observe
+   * the driver's local cache eviction, so caching must be disabled in that mode.
+   */
+  public boolean shouldCacheReadShuffleHandle() {
+    return readShuffleHandleCacheEnabled && !rssStageRetryForWriteFailureEnabled;
   }
 }

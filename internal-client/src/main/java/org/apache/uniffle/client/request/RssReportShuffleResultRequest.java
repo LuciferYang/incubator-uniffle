@@ -31,6 +31,7 @@ public class RssReportShuffleResultRequest {
   private int shuffleId;
   private long taskAttemptId;
   private int bitmapNum;
+  private Integer stageAttemptNumber;
   private Map<Integer, List<Long>> partitionToBlockIds;
   private Map<Integer, Long> partitionToRecordNumbers;
 
@@ -41,10 +42,47 @@ public class RssReportShuffleResultRequest {
       Map<Integer, List<Long>> partitionToBlockIds,
       int bitmapNum,
       Map<Integer, Long> partitionToRecordNumbers) {
+    this(
+        appId,
+        shuffleId,
+        taskAttemptId,
+        partitionToBlockIds,
+        bitmapNum,
+        null,
+        partitionToRecordNumbers);
+  }
+
+  public RssReportShuffleResultRequest(
+      String appId,
+      int shuffleId,
+      long taskAttemptId,
+      Map<Integer, List<Long>> partitionToBlockIds,
+      int bitmapNum,
+      int stageAttemptNumber,
+      Map<Integer, Long> partitionToRecordNumbers) {
+    this(
+        appId,
+        shuffleId,
+        taskAttemptId,
+        partitionToBlockIds,
+        bitmapNum,
+        Integer.valueOf(stageAttemptNumber),
+        partitionToRecordNumbers);
+  }
+
+  private RssReportShuffleResultRequest(
+      String appId,
+      int shuffleId,
+      long taskAttemptId,
+      Map<Integer, List<Long>> partitionToBlockIds,
+      int bitmapNum,
+      Integer stageAttemptNumber,
+      Map<Integer, Long> partitionToRecordNumbers) {
     this.appId = appId;
     this.shuffleId = shuffleId;
     this.taskAttemptId = taskAttemptId;
     this.bitmapNum = bitmapNum;
+    this.stageAttemptNumber = stageAttemptNumber;
     this.partitionToBlockIds = partitionToBlockIds;
     this.partitionToRecordNumbers = partitionToRecordNumbers;
   }
@@ -56,6 +94,23 @@ public class RssReportShuffleResultRequest {
       Map<Integer, List<Long>> partitionToBlockIds,
       int bitmapNum) {
     this(appId, shuffleId, taskAttemptId, partitionToBlockIds, bitmapNum, null);
+  }
+
+  public RssReportShuffleResultRequest(
+      String appId,
+      int shuffleId,
+      long taskAttemptId,
+      Map<Integer, List<Long>> partitionToBlockIds,
+      int bitmapNum,
+      int stageAttemptNumber) {
+    this(
+        appId,
+        shuffleId,
+        taskAttemptId,
+        partitionToBlockIds,
+        bitmapNum,
+        stageAttemptNumber,
+        null);
   }
 
   public String getAppId() {
@@ -72,6 +127,14 @@ public class RssReportShuffleResultRequest {
 
   public int getBitmapNum() {
     return bitmapNum;
+  }
+
+  public int getStageAttemptNumber() {
+    return stageAttemptNumber == null ? 0 : stageAttemptNumber;
+  }
+
+  public boolean hasStageAttemptNumber() {
+    return stageAttemptNumber != null;
   }
 
   public Map<Integer, List<Long>> getPartitionToBlockIds() {
@@ -110,15 +173,17 @@ public class RssReportShuffleResultRequest {
       }
     }
 
-    RssProtos.ReportShuffleResultRequest rpcRequest =
+    RssProtos.ReportShuffleResultRequest.Builder rpcRequest =
         RssProtos.ReportShuffleResultRequest.newBuilder()
             .setAppId(request.getAppId())
             .setShuffleId(request.getShuffleId())
             .setTaskAttemptId(request.getTaskAttemptId())
             .setBitmapNum(request.getBitmapNum())
             .addAllPartitionToBlockIds(partitionToBlockIds)
-            .addAllPartitionStats(partitionStats)
-            .build();
-    return rpcRequest;
+            .addAllPartitionStats(partitionStats);
+    if (request.hasStageAttemptNumber()) {
+      rpcRequest.setStageAttemptNumber(request.getStageAttemptNumber());
+    }
+    return rpcRequest.build();
   }
 }

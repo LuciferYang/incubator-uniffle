@@ -22,6 +22,8 @@ import org.apache.uniffle.common.rpc.StatusCode;
 public class RssSendCommitResponse extends ClientResponse {
 
   private int commitCount;
+  private boolean stageAttemptAccepted;
+  private boolean hasStageAttemptAccepted;
 
   public RssSendCommitResponse(StatusCode statusCode) {
     super(statusCode);
@@ -33,5 +35,18 @@ public class RssSendCommitResponse extends ClientResponse {
 
   public void setCommitCount(int commitCount) {
     this.commitCount = commitCount;
+  }
+
+  public boolean isStageAttemptAccepted() {
+    return stageAttemptAccepted;
+  }
+
+  public void setStageAttemptAccepted(boolean stageAttemptAccepted) {
+    this.stageAttemptAccepted = stageAttemptAccepted;
+    this.hasStageAttemptAccepted = true;
+  }
+
+  public boolean hasStageAttemptAccepted() {
+    return hasStageAttemptAccepted;
   }
 }

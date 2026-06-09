@@ -651,7 +651,13 @@ public class RssShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
     ExecutorService executor = Executors.newSingleThreadExecutor();
     Future<Boolean> future =
         executor.submit(
-            () -> shuffleWriteClient.sendCommit(shuffleServersForData, appId, shuffleId, numMaps));
+            () ->
+                shuffleWriteClient.sendCommit(
+                    shuffleServersForData,
+                    appId,
+                    shuffleId,
+                    numMaps,
+                    taskContext.stageAttemptNumber()));
     int maxWait = 5000;
     int currentWait = 200;
     long start = System.currentTimeMillis();
@@ -698,6 +704,7 @@ public class RssShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
             shuffleId,
             taskAttemptId,
             bitmapSplitNum,
+            taskContext.stageAttemptNumber(),
             recordReportFailedShuffleservers,
             enableWriteFailureRetry,
             isIntegrityValidationClientManagementEnabled
@@ -848,6 +855,14 @@ public class RssShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
             RssSparkShuffleUtils.createFetchFailedException(
                 shuffleId, -1, taskContext.stageAttemptNumber(), e);
         throw new RssException(ffe);
+      }
+      if (response.getStatusCode() != StatusCode.SUCCESS) {
+        throw new RssException(
+            "Report shuffle write failure failed: "
+                + response.getStatusCode()
+                + ", "
+                + response.getMessage(),
+            e);
       }
     }
     throw new RssException(e);

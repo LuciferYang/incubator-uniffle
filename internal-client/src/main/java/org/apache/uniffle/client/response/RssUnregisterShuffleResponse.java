@@ -21,7 +21,32 @@ import org.apache.uniffle.common.rpc.StatusCode;
 
 public class RssUnregisterShuffleResponse extends ClientResponse {
 
+  private final boolean stageAttemptCleanupCompleted;
+  private final boolean hasStageAttemptCleanupCompleted;
+
   public RssUnregisterShuffleResponse(StatusCode statusCode) {
+    this(statusCode, false, false);
+  }
+
+  public RssUnregisterShuffleResponse(
+      StatusCode statusCode, boolean stageAttemptCleanupCompleted) {
+    this(statusCode, stageAttemptCleanupCompleted, true);
+  }
+
+  public RssUnregisterShuffleResponse(
+      StatusCode statusCode,
+      boolean stageAttemptCleanupCompleted,
+      boolean hasStageAttemptCleanupCompleted) {
     super(statusCode);
+    this.stageAttemptCleanupCompleted = stageAttemptCleanupCompleted;
+    this.hasStageAttemptCleanupCompleted = hasStageAttemptCleanupCompleted;
+  }
+
+  public boolean isStageAttemptCleanupCompleted() {
+    return stageAttemptCleanupCompleted;
+  }
+
+  public boolean hasStageAttemptCleanupCompleted() {
+    return hasStageAttemptCleanupCompleted;
   }
 }

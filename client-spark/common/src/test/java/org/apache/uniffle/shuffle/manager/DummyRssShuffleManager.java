@@ -31,6 +31,8 @@ import org.apache.uniffle.shuffle.BlockIdManager;
 
 public class DummyRssShuffleManager implements RssShuffleManagerInterface {
   public Set<Integer> unregisteredShuffleIds = new LinkedHashSet<>();
+  public Set<Integer> unregisteredMapOutputShuffleIds = new LinkedHashSet<>();
+  public Set<Integer> unregisteredShuffleDataIds = new LinkedHashSet<>();
 
   @Override
   public String getAppId() {
@@ -49,6 +51,13 @@ public class DummyRssShuffleManager implements RssShuffleManagerInterface {
 
   @Override
   public void unregisterAllMapOutput(int shuffleId) {
+    unregisteredMapOutputShuffleIds.add(shuffleId);
+    unregisteredShuffleIds.add(shuffleId);
+  }
+
+  @Override
+  public void unregisterShuffleDataForWriteFailure(int shuffleId, int stageAttemptNumber) {
+    unregisteredShuffleDataIds.add(shuffleId);
     unregisteredShuffleIds.add(shuffleId);
   }
 

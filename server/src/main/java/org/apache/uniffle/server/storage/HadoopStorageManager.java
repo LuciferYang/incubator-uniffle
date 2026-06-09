@@ -104,8 +104,6 @@ public class HadoopStorageManager extends SingleStorageManager {
     if (storage != null) {
       boolean purgeForExpired = false;
       if (event instanceof AppPurgeEvent) {
-        storage.removeHandlers(appId);
-        appIdToStorages.remove(appId);
         purgeForExpired = ((AppPurgeEvent) event).isAppExpired();
       }
       ShuffleDeleteHandler deleteHandler =
@@ -150,7 +148,15 @@ public class HadoopStorageManager extends SingleStorageManager {
                   storage.getStoragePath()));
         }
       }
-      deleteHandler.delete(deletePaths.toArray(new String[0]), appId, event.getUser());
+      boolean isSuccess = deleteHandler.delete(deletePaths.toArray(new String[0]), appId, event.getUser());
+      if (!isSuccess) {
+        throw new RssException(
+            "Failed to delete shuffle data for appId[" + appId + "] with paths " + deletePaths);
+      }
+      if (event instanceof AppPurgeEvent) {
+        storage.removeHandlers(appId);
+        appIdToStorages.remove(appId);
+      }
       removeAppStorageInfo(event);
     } else {
       LOG.warn("Storage gotten is null when removing resources for event: {}", event);

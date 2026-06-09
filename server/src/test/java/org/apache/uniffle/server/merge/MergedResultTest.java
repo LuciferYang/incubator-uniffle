@@ -45,8 +45,11 @@ import org.apache.uniffle.common.serializer.SerializerUtils;
 import static org.apache.uniffle.common.serializer.SerializerUtils.genData;
 import static org.apache.uniffle.server.ShuffleServerConf.SERVER_MERGE_DEFAULT_MERGED_BLOCK_SIZE;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 
 class MergedResultTest {
 
@@ -95,6 +98,20 @@ class MergedResultTest {
     }
     assertEquals(BYTES_LEN, index);
     blocks.forEach(block -> block.getRight().release());
+  }
+
+  @Test
+  void mergedResultShouldFailWhenCacheMergedBlockReturnsFalse() throws IOException {
+    RssConf rssConf = new RssConf();
+    Partition partition = mock(Partition.class);
+    MergedResult result = new MergedResult(rssConf, (byteBuf, blockId, length) -> false, -1, partition);
+    SerOutputStream output = result.getOutputStream(false, 1);
+
+    output.write(1);
+    assertThrows(IOException.class, output::flush);
+    verify(partition, times(1)).requireMemory(1);
+    verify(partition, times(1)).releaseMemory(1);
+    output.close();
   }
 
   @ParameterizedTest

@@ -17,15 +17,24 @@
 
 package org.apache.uniffle.client.request;
 
+import org.apache.uniffle.proto.RssProtos;
+
 public class RssUnregisterShuffleRequest {
   private String appId;
   private int shuffleId;
   private int timeoutSec;
+  private Integer stageAttemptNumber;
 
   public RssUnregisterShuffleRequest(String appId, int shuffleId, int timeoutSec) {
+    this(appId, shuffleId, timeoutSec, null);
+  }
+
+  public RssUnregisterShuffleRequest(
+      String appId, int shuffleId, int timeoutSec, Integer stageAttemptNumber) {
     this.appId = appId;
     this.shuffleId = shuffleId;
     this.timeoutSec = timeoutSec;
+    this.stageAttemptNumber = stageAttemptNumber;
   }
 
   public String getAppId() {
@@ -38,5 +47,24 @@ public class RssUnregisterShuffleRequest {
 
   public int getTimeoutSec() {
     return timeoutSec;
+  }
+
+  public int getStageAttemptNumber() {
+    return stageAttemptNumber == null ? 0 : stageAttemptNumber;
+  }
+
+  public boolean hasStageAttemptNumber() {
+    return stageAttemptNumber != null;
+  }
+
+  public RssProtos.ShuffleUnregisterRequest toProto() {
+    RssProtos.ShuffleUnregisterRequest.Builder builder =
+        RssProtos.ShuffleUnregisterRequest.newBuilder()
+            .setAppId(appId)
+            .setShuffleId(shuffleId);
+    if (hasStageAttemptNumber()) {
+      builder.setStageAttemptNumber(getStageAttemptNumber());
+    }
+    return builder.build();
   }
 }
